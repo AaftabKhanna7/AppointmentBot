@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { Send, User, Bot, UploadCloud, FileText, CheckCircle2, AlertTriangle, Edit, Paperclip, Calendar, Clock, LayoutDashboard, Download, ArrowLeft, Mail, FolderUp } from 'lucide-react';
+import { Send, User, Bot, UploadCloud, FileText, CheckCircle2, AlertTriangle, Edit, Paperclip, Calendar, Clock, LayoutDashboard, Download, ArrowLeft, Mail, FolderUp, Reply } from 'lucide-react';
 
 const EAST_DESTINATIONS = [
   "SFC - 7275 - Vaughan", "DFC - 7340 - Bolton", "MDO - 7364 - Montreal",
@@ -102,10 +102,17 @@ export default function App() {
   const [editData, setEditData] = useState({});
   const [editErrors, setEditErrors] = useState({});
   const [targetDate, setTargetDate] = useState('');
+  const [showEasterEgg, setShowEasterEgg] = useState(false);
 
   // --- Shared State Variables (Admin) ---
   const [allRequests, setAllRequests] = useState([]);
   const [isDragging, setIsDragging] = useState(false);
+  
+  // --- Admin Reply Modal State ---
+  const [replyModalOpen, setReplyModalOpen] = useState(false);
+  const [activeReplyReq, setActiveReplyReq] = useState(null);
+  const [replyType, setReplyType] = useState('slot1'); // 'slot1', 'slot2', 'slot3', 'other'
+  const [customTimeMsg, setCustomTimeMsg] = useState('');
 
   const messagesEndRef = useRef(null);
   const scrollToBottom = () => {
@@ -649,6 +656,90 @@ export default function App() {
     });
   };
 
+  // --- Easter Egg Logic ---
+  const handleHeaderDoubleClick = () => {
+    const fireConfetti = () => {
+      if (window.confetti) {
+        window.confetti({ particleCount: 150, spread: 80, origin: { y: 0.6 } });
+      }
+    };
+
+    if (window.confetti) {
+      fireConfetti();
+    } else {
+      const script = document.createElement('script');
+      script.src = 'https://cdn.jsdelivr.net/npm/canvas-confetti@1.6.0/dist/confetti.browser.min.js';
+      script.onload = fireConfetti;
+      document.head.appendChild(script);
+    }
+
+    setShowEasterEgg(true);
+    setTimeout(() => setShowEasterEgg(false), 2000);
+  };
+
+  // --- Admin Sending Confirmations ---
+  const openReplyModal = (req) => {
+    if (!req.carrierEmail) {
+      alert("No email address was provided by the carrier for this request.");
+      return;
+    }
+    setActiveReplyReq(req);
+    setReplyType('slot1');
+    setCustomTimeMsg('');
+    setReplyModalOpen(true);
+  };
+
+  const generateReplyEmail = () => {
+    const req = activeReplyReq;
+    if (!req) return;
+
+    let selectedTime = '';
+    let isCustom = false;
+    if (replyType === 'slot1') selectedTime = req.timeSlot1;
+    else if (replyType === 'slot2') selectedTime = req.timeSlot2;
+    else if (replyType === 'slot3') selectedTime = req.timeSlot3;
+    else {
+      selectedTime = customTimeMsg;
+      isCustom = true;
+    }
+
+    const subject = `Confirmation: Load Booking Request - ${req.idValue || 'N/A'}`;
+    let bodyText = `Hello,\r\n\r\nRegarding your load booking request for ${req.destination || ''}:\r\n\r\n`;
+    bodyText += `ID/PO: ${req.idValue || 'N/A'}\r\n`;
+    bodyText += `Target Date: ${req.appointmentDate || 'N/A'}\r\n\r\n`;
+
+    if (isCustom) {
+       bodyText += `Unfortunately, your requested time preferences are not available. Are you good to proceed with the following proposed time?\r\n\r\nProposed Time: ${selectedTime}\r\n\r\nPlease confirm if this works for you.\r\n\r\n`;
+    } else {
+       bodyText += `Your appointment has been confirmed for the following time slot:\r\n\r\nConfirmed Time: ${selectedTime}\r\n\r\n`;
+    }
+
+    bodyText += `Thank you,\r\nHome Depot Planning Team`;
+
+    const emlContent = [
+      `To: ${req.carrierEmail}`,
+      `Subject: ${subject}`,
+      `X-Unsent: 1`, // Opens as a draft in Outlook
+      `Content-Type: text/plain; charset="UTF-8"`,
+      ``,
+      bodyText
+    ].join('\r\n');
+
+    // Create a downloadable blob to completely bypass the Home Depot portal iframe restrictions
+    const blob = new Blob([emlContent], { type: 'message/rfc822' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = `Reply_${req.idValue || 'Booking'}.eml`;
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    URL.revokeObjectURL(url);
+
+    setReplyModalOpen(false);
+    setActiveReplyReq(null);
+  };
+
   const exportAdminToExcel = async () => {
     try {
       await new Promise((resolve, reject) => {
@@ -838,11 +929,14 @@ export default function App() {
       
       {/* Header */}
       <header className="bg-[#f96302] text-white p-4 shadow-md z-10 flex justify-between items-center relative">
-        <div className="flex items-center gap-3">
+        <div 
+          className="flex items-center gap-3 cursor-pointer select-none transition-transform active:scale-95" 
+          onDoubleClick={handleHeaderDoubleClick}
+          title="Double click me!"
+        >
           <img src={CUSTOM_LOGO_URL} alt="Company Logo" className="h-10 w-10 object-contain bg-white p-1 shadow-sm rounded" onError={(e) => { e.target.style.display = 'none'; }} />
           <div>
             <h1 className="text-lg font-bold uppercase tracking-wide">Load Booking Assistant</h1>
-            <p className="text-orange-100 text-xs">Enterprise Logistics Operations</p>
           </div>
         </div>
         <div className="flex items-center gap-4">
@@ -857,6 +951,15 @@ export default function App() {
            )}
         </div>
       </header>
+
+      {/* Easter Egg Toast */}
+      {showEasterEgg && (
+        <div className="fixed top-20 left-1/2 transform -translate-x-1/2 bg-slate-900 text-white px-6 py-4 rounded-xl shadow-2xl z-[100] animate-in slide-in-from-top-4 fade-in duration-300 flex flex-col items-center gap-1 border border-slate-700">
+          <span className="text-2xl mb-1">🎉</span>
+          <p className="font-bold text-center text-lg">Made by Aaftab khanna</p>
+          <p className="text-sm text-center text-slate-300">Aaftabkhanna007@outlook.com</p>
+        </div>
+      )}
 
       {/* --- Admin View (The Compiler) --- */}
       {viewMode === 'admin' ? (
@@ -913,9 +1016,9 @@ export default function App() {
                         <th className="px-4 py-3">Load Type</th>
                         <th className="px-4 py-3">Target Date</th>
                         <th className="px-4 py-3">Time Preferences</th>
-                        <th className="px-4 py-3">Carrier</th>
                         <th className="px-4 py-3">Carrier Email</th>
                         <th className="px-4 py-3 text-center">Status</th>
+                        <th className="px-4 py-3 text-center">Actions</th>
                       </tr>
                     </thead>
                     <tbody className="divide-y divide-slate-100">
@@ -943,12 +1046,19 @@ export default function App() {
                                  {req.timeSlot3 && <span className="text-slate-400">3. {req.timeSlot3}</span>}
                                </div>
                             </td>
-                            <td className="px-4 py-3 text-slate-600 truncate max-w-[120px]">{req.carrier}</td>
                             <td className="px-4 py-3 text-slate-600 truncate max-w-[150px]">{req.carrierEmail}</td>
                             <td className="px-4 py-3 text-center">
                               <span className={`px-2.5 py-1 rounded-full text-[11px] font-bold tracking-wide ${req.status?.includes('Drop') ? 'bg-green-100 text-green-700' : 'bg-amber-100 text-amber-700'}`}>
                                 {req.status}
                               </span>
+                            </td>
+                            <td className="px-4 py-3 text-center">
+                              <button 
+                                onClick={() => openReplyModal(req)}
+                                className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-blue-50 text-blue-700 hover:bg-blue-100 rounded-md font-medium text-xs transition-colors border border-blue-200"
+                              >
+                                <Reply className="w-3.5 h-3.5" /> Reply
+                              </button>
                             </td>
                           </tr>
                         ))
@@ -1007,6 +1117,64 @@ export default function App() {
 
       {/* --- Modals --- */}
       <Modal {...modalConfig} />
+
+      {/* Admin Reply Modal */}
+      {replyModalOpen && activeReplyReq && (
+        <div className="fixed inset-0 bg-black/60 flex items-center justify-center p-4 z-50 animate-in fade-in">
+          <div className="bg-white rounded-xl shadow-xl w-full max-w-lg flex flex-col overflow-hidden">
+            <div className="p-4 border-b bg-slate-50 flex items-center gap-2 text-blue-700">
+              <Reply className="w-5 h-5"/>
+              <h3 className="font-bold text-lg">Send Confirmation to Carrier</h3>
+            </div>
+            <div className="p-6 flex flex-col gap-4">
+               <p className="text-sm text-slate-600">Select the confirmed time slot for <strong>{activeReplyReq.carrier}</strong> (ID: {activeReplyReq.idValue}):</p>
+               <div className="flex flex-col gap-3">
+                 <label className={`flex items-center gap-3 p-3 border rounded-lg cursor-pointer transition-colors ${replyType === 'slot1' ? 'border-blue-500 bg-blue-50' : 'hover:bg-slate-50'}`}>
+                   <input type="radio" name="replyType" value="slot1" checked={replyType === 'slot1'} onChange={() => setReplyType('slot1')} className="text-blue-600" />
+                   <div><span className="font-medium text-slate-800">1st Choice:</span> <span className="text-slate-600">{activeReplyReq.timeSlot1}</span></div>
+                 </label>
+                 {activeReplyReq.timeSlot2 && (
+                   <label className={`flex items-center gap-3 p-3 border rounded-lg cursor-pointer transition-colors ${replyType === 'slot2' ? 'border-blue-500 bg-blue-50' : 'hover:bg-slate-50'}`}>
+                     <input type="radio" name="replyType" value="slot2" checked={replyType === 'slot2'} onChange={() => setReplyType('slot2')} className="text-blue-600" />
+                     <div><span className="font-medium text-slate-800">2nd Choice:</span> <span className="text-slate-600">{activeReplyReq.timeSlot2}</span></div>
+                   </label>
+                 )}
+                 {activeReplyReq.timeSlot3 && (
+                   <label className={`flex items-center gap-3 p-3 border rounded-lg cursor-pointer transition-colors ${replyType === 'slot3' ? 'border-blue-500 bg-blue-50' : 'hover:bg-slate-50'}`}>
+                     <input type="radio" name="replyType" value="slot3" checked={replyType === 'slot3'} onChange={() => setReplyType('slot3')} className="text-blue-600" />
+                     <div><span className="font-medium text-slate-800">3rd Choice:</span> <span className="text-slate-600">{activeReplyReq.timeSlot3}</span></div>
+                   </label>
+                 )}
+                 <label className={`flex flex-col gap-2 p-3 border rounded-lg cursor-pointer transition-colors ${replyType === 'other' ? 'border-blue-500 bg-blue-50' : 'hover:bg-slate-50'}`}>
+                   <div className="flex items-center gap-3">
+                     <input type="radio" name="replyType" value="other" checked={replyType === 'other'} onChange={() => setReplyType('other')} className="text-blue-600" />
+                     <span className="font-medium text-slate-800">Other / Propose New Time</span>
+                   </div>
+                   {replyType === 'other' && (
+                     <input 
+                       type="text" 
+                       className="mt-2 border border-slate-300 p-2.5 rounded-lg outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500 w-full text-sm transition-all" 
+                       placeholder="e.g. Next Tuesday at 2:00 PM"
+                       value={customTimeMsg}
+                       onChange={(e) => setCustomTimeMsg(e.target.value)}
+                     />
+                   )}
+                 </label>
+               </div>
+            </div>
+            <div className="p-4 border-t bg-slate-50 flex justify-end gap-3">
+               <button onClick={() => setReplyModalOpen(false)} className="px-4 py-2 text-slate-600 hover:bg-slate-200 rounded-lg font-medium transition-colors">Cancel</button>
+               <button 
+                 onClick={generateReplyEmail} 
+                 disabled={replyType === 'other' && !customTimeMsg.trim()} 
+                 className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 font-bold shadow-sm disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+               >
+                 Generate Draft
+               </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {editModalOpen && (
         <div className="fixed inset-0 bg-black/60 flex items-center justify-center p-4 z-50">
