@@ -1,5 +1,5 @@
-import React, { useState, useEffect } from 'react';
-import { UploadCloud, FileText, CheckCircle2, AlertTriangle, Calendar, Clock, LayoutDashboard, Download, ArrowLeft, Mail, FolderUp, Reply, MapPin, Truck, UserCircle, Save, Plus, X, MessageSquare, AlertCircle, ArrowUp, ArrowDown, ArrowUpDown, Database } from 'lucide-react';
+import React, { useState, useEffect, useRef, useMemo } from 'react';
+import { UploadCloud, FileText, CheckCircle2, AlertTriangle, Calendar, Clock, LayoutDashboard, Download, ArrowLeft, Mail, Reply, MapPin, Truck, UserCircle, Save, Plus, X, MessageSquare, AlertCircle, ArrowUp, ArrowDown, ArrowUpDown, Filter, ChevronDown, RotateCcw } from 'lucide-react';
 
 const EAST_DESTINATIONS = [
   "SFC - 7275 - Vaughan", "DFC - 7340 - Bolton", "MDO - 7364 - Montreal",
@@ -12,10 +12,10 @@ const WEST_DESTINATIONS = [
 ];
 
 const ALL_TIME_SLOTS = [
-  "8:00 AM - 9:00 AM", "9:00 AM - 10:00 AM", "10:00 AM - 11:00 AM", 
-  "11:00 AM - 12:00 PM", "12:00 PM - 1:00 PM", "1:00 PM - 2:00 PM", 
-  "2:00 PM - 3:00 PM", "3:00 PM - 4:00 PM", "4:00 PM - 5:00 PM", 
-  "5:00 PM - 6:00 PM", "6:00 PM - 7:00 PM", "7:00 PM - 8:00 PM"
+  "8:00 AM", "9:00 AM", "10:00 AM", 
+  "11:00 AM", "12:00 PM", "1:00 PM", 
+  "2:00 PM", "3:00 PM", "4:00 PM", 
+  "5:00 PM", "6:00 PM", "7:00 PM"
 ];
 
 // Helper to get available time slots for a given date in the specific region
@@ -49,17 +49,6 @@ const getAvailableTimeSlots = (dateStr, region) => {
     });
   }
   return allSlots;
-};
-
-// Helper to get today's date in local region time for strict date picking
-const getTodayString = (region) => {
-  const timeZone = region === 'East' ? 'America/New_York' : 'America/Denver';
-  const localDateString = new Date().toLocaleString("en-US", { timeZone: timeZone || 'America/New_York' });
-  const localDate = new Date(localDateString);
-  const year = localDate.getFullYear();
-  const month = String(localDate.getMonth() + 1).padStart(2, '0');
-  const date = String(localDate.getDate()).padStart(2, '0');
-  return `${year}-${month}-${date}`;
 };
 
 // Helper to check cutoff warnings
@@ -122,17 +111,15 @@ const formatTmDate = (dateStr) => {
   if (!dateStr) return '';
   const str = String(dateStr).trim();
   
-  // Handle Excel Serial Date (e.g., 46182 for Jun 9 2026)
   if (!isNaN(str) && Number(str) > 20000) {
      const d = new Date(Math.round((Number(str) - 25569) * 86400 * 1000));
      return `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, '0')}-${String(d.getUTCDate()).padStart(2, '0')}`;
   }
 
-  if (str.match(/^\d{4}-\d{2}-\d{2}$/)) return str; // Already YYYY-MM-DD
+  if (str.match(/^\d{4}-\d{2}-\d{2}$/)) return str; 
   if (str.includes('/')) {
     const parts = str.split('/');
     if (parts.length === 3) {
-       // Assumes MM/DD/YYYY from SAP
        return `${parts[2]}-${parts[0].padStart(2, '0')}-${parts[1].padStart(2, '0')}`;
     }
   }
@@ -144,8 +131,7 @@ const formatTmTime = (timeStr) => {
   if (!timeStr) return '';
   const str = String(timeStr).trim();
 
-  // Handle Excel Serial Time (e.g., 0.979166667 for 11:30 PM)
-  if (!isNaN(str) && Number(str) >= 0 && Number(str) <= 1) {
+  if (!isNaN(str) && Number(str) >= 0 && Number(str) <= 1 && str !== '') {
      const totalSeconds = Math.round(Number(str) * 86400);
      let hours = Math.floor(totalSeconds / 3600);
      const minutes = Math.floor((totalSeconds % 3600) / 60);
@@ -153,10 +139,78 @@ const formatTmTime = (timeStr) => {
      hours = hours % 12 || 12;
      return `${hours}:${String(minutes).padStart(2, '0')} ${ampm}`;
   }
+  
+  const timeMatch = str.match(/^(\d{1,2}):(\d{2})(?::(\d{2}))?$/);
+  if (timeMatch) {
+     let hours = parseInt(timeMatch[1], 10);
+     const minutes = timeMatch[2];
+     const ampm = hours >= 12 ? 'PM' : 'AM';
+     hours = hours % 12 || 12;
+     return `${hours}:${minutes} ${ampm}`;
+  }
+
   return str;
 };
 
-// Unified helper function for real-time date validation
+// Helper to perfectly normalize any time string (12hr, 24hr, decimal) to 24h H:MM for strict comparisons
+const normalizeTimeForComparison = (timeStr) => {
+  if (!timeStr) return '';
+  let str = String(timeStr).trim();
+  
+  if (!isNaN(str) && Number(str) >= 0 && Number(str) <= 1 && str !== '') {
+      const totalSeconds = Math.round(Number(str) * 86400);
+      let h = Math.floor(totalSeconds / 3600);
+      let m = Math.floor((totalSeconds % 3600) / 60);
+      return `${h}:${String(m).padStart(2, '0')}`;
+  }
+
+  const match = str.match(/^(\d{1,2}):(\d{2})(?::(\d{2}))?\s*(AM|PM|am|pm)?$/);
+  if (match) {
+      let h = parseInt(match[1], 10);
+      let m = match[2];
+      let ampm = match[4] ? match[4].toUpperCase() : null;
+
+      if (ampm === 'PM' && h < 12) h += 12;
+      if (ampm === 'AM' && h === 12) h = 0;
+
+      return `${h}:${m}`; 
+  }
+  return str;
+};
+
+// Helper to format time strictly to 12-hour format WITH seconds (e.g., 8:00:00 AM) for 7411 Slots
+const formatTo12HrWithSeconds = (timeStr) => {
+  if (!timeStr) return '';
+  let str = String(timeStr).trim();
+  
+  if (!isNaN(str) && Number(str) >= 0 && Number(str) <= 1 && str !== '') {
+      const totalSeconds = Math.round(Number(str) * 86400);
+      let h = Math.floor(totalSeconds / 3600);
+      let m = Math.floor((totalSeconds % 3600) / 60);
+      let s = totalSeconds % 60;
+      const ampm = h >= 12 ? 'PM' : 'AM';
+      h = h % 12 || 12;
+      return `${h}:${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')} ${ampm}`;
+  }
+  
+  const match = str.match(/^(\d{1,2}):(\d{2})(?::(\d{2}))?\s*(AM|PM|am|pm)?$/);
+  if (match) {
+      let h = parseInt(match[1], 10);
+      let m = match[2];
+      let s = match[3] || '00';
+      let ampm = match[4] ? match[4].toUpperCase() : null;
+      
+      if (ampm) {
+          return `${h}:${m}:${s} ${ampm}`;
+      } else {
+          const isPm = h >= 12;
+          h = h % 12 || 12;
+          return `${h}:${m}:${s} ${isPm ? 'PM' : 'AM'}`;
+      }
+  }
+  return str;
+};
+
 const checkDateError = (dateStr, region) => {
   if (!dateStr) return null;
   const minAllowedDate = region ? calculateTargetDate(region) : '';
@@ -178,8 +232,8 @@ const checkDateError = (dateStr, region) => {
   return null;
 };
 
-// Unified helper function for real-time time slot validation
-const checkTimeSlotError = (dateStr, timeSlot, region) => {
+const checkTimeSlotError = (dateStr, timeSlot, region, is247DropFacility) => {
+  if (is247DropFacility) return null; // Exempt from time validation
   if (!timeSlot || !dateStr) return null;
   const availableSlots = getAvailableTimeSlots(dateStr, region);
   if (!availableSlots.includes(timeSlot)) {
@@ -194,6 +248,7 @@ const initialFormState = {
   destination: '',
   applianceDropOff: 'N/A',
   loadType: '',
+  boltonTrailerType: '',
   liveLoadAcknowledged: false,
   ids: [{ identifiers: [{ type: 'Shipment ID', value: '' }], date: '', timeSlot: '', skidCount: '', comments: '' }],
   hasBol: '',
@@ -206,6 +261,80 @@ const initialFormState = {
   systemTimeWarning: 'None'
 };
 
+// Stable Multi-Select Dropdown Component with embedded Search
+const MultiSelectDropdown = ({ filterKey, label, options, activeDropdown, setActiveDropdown, slotFilters, handleSlotFilterChange, setSlotFilters }) => {
+    const isOpen = activeDropdown === filterKey;
+    const selectedCount = slotFilters[filterKey]?.length || 0;
+    const [searchTerm, setSearchTerm] = useState('');
+
+    useEffect(() => {
+        if (!isOpen) setSearchTerm('');
+    }, [isOpen]);
+
+    const filteredOptions = options.filter(opt =>
+        String(opt).toLowerCase().includes(searchTerm.toLowerCase())
+    );
+
+    return (
+        <div className="relative inline-block text-left mr-3 mb-3">
+            <button
+                type="button"
+                onClick={() => setActiveDropdown(isOpen ? null : filterKey)}
+                className={`inline-flex justify-between items-center w-full px-4 py-2 text-sm font-medium text-slate-700 bg-white border rounded-lg shadow-sm hover:bg-slate-50 focus:outline-none transition-colors ${selectedCount > 0 ? 'border-[#f96302] ring-1 ring-[#f96302] ring-opacity-20' : 'border-slate-300'}`}
+            >
+                {label} {selectedCount > 0 && <span className="ml-2 bg-[#f96302] text-white text-[10px] font-bold px-2 py-0.5 rounded-full">{selectedCount}</span>}
+                <ChevronDown className="w-4 h-4 ml-2 -mr-1 text-slate-400" />
+            </button>
+
+            {isOpen && (
+                <div className="absolute z-50 w-56 mt-2 origin-top-right bg-white rounded-md shadow-lg ring-1 ring-black ring-opacity-5 focus:outline-none">
+                    <div className="p-2 border-b border-slate-100">
+                        <input
+                            type="text"
+                            className="w-full px-2 py-1.5 text-xs border border-slate-300 rounded focus:outline-none focus:border-[#f96302] focus:ring-1 focus:ring-[#f96302]"
+                            placeholder={`Search ${label}...`}
+                            value={searchTerm}
+                            onChange={(e) => setSearchTerm(e.target.value)}
+                            onClick={(e) => e.stopPropagation()} 
+                            autoFocus
+                        />
+                    </div>
+                    <div className="p-2 max-h-60 overflow-y-auto">
+                        {filteredOptions.length === 0 ? (
+                            <p className="p-2 text-sm text-slate-500 italic">No options found</p>
+                        ) : (
+                            filteredOptions.map((option) => (
+                                <label key={option} className="flex items-center p-2 rounded hover:bg-slate-50 cursor-pointer">
+                                    <input
+                                        type="checkbox"
+                                        className="w-4 h-4 text-[#f96302] bg-slate-100 border-slate-300 rounded focus:ring-[#f96302] accent-[#f96302]"
+                                        checked={slotFilters[filterKey]?.includes(option) || false}
+                                        onChange={() => handleSlotFilterChange(filterKey, option)}
+                                    />
+                                    <span className="ml-2 text-sm font-medium text-slate-700 truncate" title={option}>{option}</span>
+                                </label>
+                            ))
+                        )}
+                    </div>
+                    {selectedCount > 0 && (
+                        <div className="p-2 border-t border-slate-100 bg-slate-50 rounded-b-md">
+                            <button
+                                onClick={(e) => {
+                                    e.preventDefault();
+                                    setSlotFilters(prev => ({ ...prev, [filterKey]: [] }));
+                                }}
+                                className="w-full px-2 py-1.5 text-xs font-bold text-slate-600 bg-white border border-slate-200 rounded hover:bg-slate-100 transition-colors"
+                            >
+                                Clear Filters
+                            </button>
+                        </div>
+                    )}
+                </div>
+            )}
+        </div>
+    );
+};
+
 export default function App() {
   const [viewMode, setViewMode] = useState('vendor'); 
   const [formStep, setFormStep] = useState('EDIT'); 
@@ -215,33 +344,54 @@ export default function App() {
   const [formErrors, setFormErrors] = useState({});
 
   const [allRequests, setAllRequests] = useState([]);
+  const [slotMatrix, setSlotMatrix] = useState([]);
   const [isDragging, setIsDragging] = useState(false);
   
   const [replyModalOpen, setReplyModalOpen] = useState(false);
   const [activeReplyReq, setActiveReplyReq] = useState(null);
 
-  // --- Bulk Reply State ---
   const [bulkReplyModalOpen, setBulkReplyModalOpen] = useState(false);
 
-  // --- Filter State ---
   const [filters, setFilters] = useState({
     status: '',
     vendor: '',
     carrier: '',
     idValue: '',
     destination: '',
+    loadType: '',
     appointmentDate: '',
     skidCount: '',
     timeSlot1: '',
+    comments: '',
     confirmedTime: '',
     appointmentId: ''
   });
 
-  // --- Sort & Selection State ---
   const [sortConfig, setSortConfig] = useState({ key: 'timestamp', direction: 'asc' });
   const [selectedIds, setSelectedIds] = useState(new Set());
 
-  // --- UI Error State ---
+  const [slotFilters, setSlotFilters] = useState({
+      facilityId: [],
+      date: [],
+      status: [],
+      vendorName: [],
+      freightOrder: [],
+      purchasingDoc: []
+  });
+
+  const [activeDropdown, setActiveDropdown] = useState(null);
+  const dropdownRef = useRef(null);
+
+  useEffect(() => {
+    function handleClickOutside(event) {
+      if (dropdownRef.current && !dropdownRef.current.contains(event.target)) {
+        setActiveDropdown(null);
+      }
+    }
+    document.addEventListener("mousedown", handleClickOutside);
+    return () => document.removeEventListener("mousedown", handleClickOutside);
+  }, []);
+
   const [tmExportError, setTmExportError] = useState(false);
 
   useEffect(() => {
@@ -269,23 +419,83 @@ export default function App() {
   };
 
   const handleIdChange = (index, field, val) => {
-    const newIds = [...formData.ids];
-    newIds[index][field] = val;
-    setFormData(prev => ({ ...prev, ids: newIds }));
+    setFormData(prev => {
+        const newIds = prev.ids.map((shipment, sIdx) => {
+            if (sIdx !== index) return shipment;
+            return { ...shipment, [field]: val };
+        });
+        return { ...prev, ids: newIds };
+    });
     
-    if (formErrors[`id_${index}_${field}`]) {
-      setFormErrors(prev => ({ ...prev, [`id_${index}_${field}`]: null }));
-    }
+    setFormErrors(prev => {
+        if (!prev[`id_${index}_${field}`]) return prev;
+        const newErrors = { ...prev };
+        delete newErrors[`id_${index}_${field}`];
+        return newErrors;
+    });
   };
 
   const handleIdentifierChange = (shipmentIndex, identIndex, field, val) => {
-    const newIds = [...formData.ids];
-    newIds[shipmentIndex].identifiers[identIndex][field] = val;
-    setFormData(prev => ({ ...prev, ids: newIds }));
+    setFormData(prev => {
+        const newIds = prev.ids.map((shipment, sIdx) => {
+            if (sIdx !== shipmentIndex) return shipment;
+            const newIdentifiers = shipment.identifiers.map((ident, iIdx) => {
+                if (iIdx !== identIndex) return ident;
+                return { ...ident, [field]: val };
+            });
+            return { ...shipment, identifiers: newIdentifiers };
+        });
+        return { ...prev, ids: newIds };
+    });
     
-    if (formErrors[`id_${shipmentIndex}_ident_${identIndex}_value`]) {
-      setFormErrors(prev => ({ ...prev, [`id_${shipmentIndex}_ident_${identIndex}_value`]: null }));
-    }
+    setFormErrors(prev => {
+        if (!prev[`id_${shipmentIndex}_ident_${identIndex}_value`]) return prev;
+        const newErrors = { ...prev };
+        delete newErrors[`id_${shipmentIndex}_ident_${identIndex}_value`];
+        return newErrors;
+    });
+  };
+
+  const handleIdentifierPaste = (e, shipmentIndex, identIndex) => {
+    e.preventDefault(); 
+    
+    const clipboardData = e.clipboardData || window.clipboardData;
+    if (!clipboardData) return;
+    
+    const pasteData = clipboardData.getData('text/plain') || clipboardData.getData('Text') || clipboardData.getData('text');
+    if (!pasteData) return;
+
+    const pastedItems = pasteData.split(/[\n\r,\t]+/).map(s => s.trim()).filter(Boolean);
+
+    if (pastedItems.length === 0) return;
+
+    setFormData(prev => {
+      const newIds = prev.ids.map((shipment, sIdx) => {
+        if (sIdx !== shipmentIndex) return shipment;
+        
+        const newIdentifiers = [...shipment.identifiers];
+        const currentType = newIdentifiers[identIndex].type;
+        
+        newIdentifiers[identIndex] = { ...newIdentifiers[identIndex], value: pastedItems[0] };
+        
+        if (pastedItems.length > 1) {
+            const newIdentifiersToAdd = pastedItems.slice(1).map(val => ({
+              type: currentType,
+              value: val
+            }));
+            newIdentifiers.splice(identIndex + 1, 0, ...newIdentifiersToAdd);
+        }
+        
+        return { ...shipment, identifiers: newIdentifiers };
+      });
+      return { ...prev, ids: newIds };
+    });
+
+    setFormErrors(prev => {
+        const newErrors = { ...prev };
+        delete newErrors[`id_${shipmentIndex}_ident_${identIndex}_value`];
+        return newErrors;
+    });
   };
 
   const handleCCChange = (index, value) => {
@@ -309,15 +519,31 @@ export default function App() {
   };
 
   const addIdentifier = (shipmentIndex) => {
-    const newIds = [...formData.ids];
-    newIds[shipmentIndex].identifiers.push({ type: 'PO', value: '' });
-    setFormData(prev => ({ ...prev, ids: newIds }));
+    setFormData(prev => {
+        const newIds = prev.ids.map((shipment, sIdx) => {
+            if (sIdx !== shipmentIndex) return shipment;
+            return {
+                ...shipment,
+                identifiers: [...shipment.identifiers, { type: 'PO', value: '' }]
+            };
+        });
+        return { ...prev, ids: newIds };
+    });
   };
 
   const removeIdentifier = (shipmentIndex, identIndex) => {
-    const newIds = [...formData.ids];
-    newIds[shipmentIndex].identifiers.splice(identIndex, 1);
-    setFormData(prev => ({ ...prev, ids: newIds }));
+    setFormData(prev => {
+        const newIds = prev.ids.map((shipment, sIdx) => {
+            if (sIdx !== shipmentIndex) return shipment;
+            const newIdentifiers = [...shipment.identifiers];
+            newIdentifiers.splice(identIndex, 1);
+            return {
+                ...shipment,
+                identifiers: newIdentifiers
+            };
+        });
+        return { ...prev, ids: newIds };
+    });
   };
 
   const addIdField = () => {
@@ -381,12 +607,22 @@ export default function App() {
       errors.liveLoadAcknowledged = "You must acknowledge the skid limit for Live Loads.";
     }
 
+    if (formData.region === 'East' && formData.destination.includes('7340')) {
+      if (!formData.boltonTrailerType) {
+        errors.boltonTrailerType = "Please select a Bolton load category.";
+      }
+    }
+
+    const is247DropFacility = formData.region === 'East' && 
+                              (formData.destination.includes('7275') || formData.destination.includes('7340')) && 
+                              formData.loadType === 'Drop Load';
+
     let totalSkids = 0;
 
     formData.ids.forEach((idObj, index) => {
       idObj.identifiers.forEach((ident, identIdx) => {
-        if (ident.type === 'Shipment ID' && !/^6100\d{4}$/.test(ident.value) && ident.value !== '99999') {
-          errors[`id_${index}_ident_${identIdx}_value`] = `Shipment ID #${identIdx + 1} must be exactly 8 digits and start with '6100', or be '99999'.`;
+        if (ident.type === 'Shipment ID' && !/^6100\d{6}$/.test(ident.value) && ident.value !== '99999') {
+          errors[`id_${index}_ident_${identIdx}_value`] = `Shipment ID #${identIdx + 1} must be exactly 10 digits and start with '6100', or be '99999'.`;
         } else if (ident.type === 'PO' && !/^([348]\d{7}|5\d{8})$/.test(ident.value) && ident.value !== '99999') {
           errors[`id_${index}_ident_${identIdx}_value`] = `PO #${identIdx + 1} must be 8 digits (starts with 3,4,8) OR 9 digits (starts with 5), or be '99999'.`;
         } else if (!ident.value) {
@@ -403,13 +639,15 @@ export default function App() {
         }
       }
 
-      if (!idObj.timeSlot) {
-        errors[`id_${index}_timeSlot`] = `Time slot is required for Shipment #${index + 1}.`;
-      } else {
-        const timeErr = checkTimeSlotError(idObj.date, idObj.timeSlot, formData.region);
-        if (timeErr) {
-          errors[`id_${index}_timeSlot`] = timeErr;
-        }
+      if (!is247DropFacility) {
+          if (!idObj.timeSlot) {
+            errors[`id_${index}_timeSlot`] = `Time slot is required for Shipment #${index + 1}.`;
+          } else {
+            const timeErr = checkTimeSlotError(idObj.date, idObj.timeSlot, formData.region, is247DropFacility);
+            if (timeErr) {
+              errors[`id_${index}_timeSlot`] = timeErr;
+            }
+          }
       }
       
       const skidNum = parseInt(idObj.skidCount, 10);
@@ -475,6 +713,10 @@ export default function App() {
   };
 
   const getCSVContent = (exportData) => {
+    const is247DropFacility = exportData.region === 'East' && 
+                              (exportData.destination.includes('7275') || exportData.destination.includes('7340')) && 
+                              exportData.loadType === 'Drop Load';
+
     const bolNames = exportData.bolFiles.map(f => f.name).join('; ');
     
     const rows = [
@@ -484,6 +726,7 @@ export default function App() {
       ["Destination", exportData.destination || ''],
       ["Appliance Drop Off", exportData.applianceDropOff || ''],
       ["Load Type", exportData.loadType || ''],
+      ["Bolton Load Category", exportData.boltonTrailerType || 'N/A'],
       ["Live Load Acknowledged", exportData.liveLoadAcknowledged ? 'Yes' : 'N/A'],
       ["Has BOL", exportData.hasBol || ''],
       ["BOL File", bolNames || 'N/A'],
@@ -504,7 +747,7 @@ export default function App() {
       rows.push([`ID ${n} - Value`, combinedValues]);
       rows.push([`ID ${n} - Identifiers Detailed`, identStrings]);
       rows.push([`ID ${n} - Date`, idObj.date || '']);
-      rows.push([`ID ${n} - Time Slot`, idObj.timeSlot || '']);
+      rows.push([`ID ${n} - Time Slot`, is247DropFacility ? '24/7 Drop' : (idObj.timeSlot || '')]);
       rows.push([`ID ${n} - Skid Count`, idObj.skidCount || '']);
       rows.push([`ID ${n} - Comments`, idObj.comments || '']);
     });
@@ -513,6 +756,10 @@ export default function App() {
   };
 
   const handleEmailBooking = () => {
+    const is247DropFacility = formData.region === 'East' && 
+                              (formData.destination.includes('7275') || formData.destination.includes('7340')) && 
+                              formData.loadType === 'Drop Load';
+
     const firstId = formData.ids[0]?.identifiers[0]?.value || '';
     const titleSuffix = formData.ids.length > 1 || formData.ids[0]?.identifiers.length > 1 ? ' & others' : '';
     const subject = `Load Booking Request - ${firstId}${titleSuffix} - ${formData.destination}`;
@@ -522,6 +769,9 @@ export default function App() {
     bodyText += `Destination: ${formData.destination || ''}\r\n`;
     if (formData.applianceDropOff && formData.applianceDropOff !== 'N/A') bodyText += `Appliance Drop Off: ${formData.applianceDropOff}\r\n`;
     bodyText += `Load Type: ${formData.loadType || ''}\r\n`;
+    if (formData.region === 'East' && formData.destination.includes('7340')) {
+        bodyText += `Bolton Category: ${formData.boltonTrailerType || ''}\r\n`;
+    }
     
     const bolNames = formData.bolFiles.map(f => f.name).join(', ');
     bodyText += `Has BOL: ${formData.hasBol || ''} ${formData.bolFiles.length > 0 ? `(${bolNames})` : ''}\r\n`;
@@ -538,7 +788,7 @@ export default function App() {
     formData.ids.forEach((idObj, index) => {
       const identStrings = idObj.identifiers.map(i => `${i.type}: ${i.value}`).join(', ');
       bodyText += `\r\n[#${index + 1}] Identifiers: ${identStrings}\r\n`;
-      bodyText += `Date: ${idObj.date} | Preferred Time: ${idObj.timeSlot} | SKIDs: ${idObj.skidCount}\r\n`;
+      bodyText += `Date: ${idObj.date} | Preferred Time: ${is247DropFacility ? '24/7 Drop' : idObj.timeSlot} | SKIDs: ${idObj.skidCount}\r\n`;
       if (idObj.comments) bodyText += `Comments: ${idObj.comments}\r\n`;
     });
     bodyText += `\r\n-----------------------\r\n`;
@@ -593,7 +843,6 @@ export default function App() {
     URL.revokeObjectURL(url);
   };
 
-  // --- Admin Bulk Compiler Logic ---
   const parseFileContent = (fileText, fileName = "") => {
     let cleanText = fileText.replace(/\u0000/g, '');
     const extractedData = {};
@@ -713,6 +962,7 @@ export default function App() {
         carrierEmail: extractedData["Carrier Email"],
         carrierEmailCC: extractedData["Carrier CC"],
         trailer: extractedData["Trailer Number"],
+        comments: extractedData["Comments"] || '',
         confirmedDate: formatTmDate(extractedData["Date"]) || '',
         confirmedTimeSlot: formatTmTime(extractedData["1st Choice Time Slot"] || extractedData["Time Slot"]) || '',
         appointmentId: '',
@@ -754,12 +1004,11 @@ export default function App() {
     });
   };
 
-  const handleTMSyncUpload = async (e) => {
+  const handleSlotMatrixUpload = async (e) => {
     const file = e.target.files[0];
     if (!file) return;
 
     try {
-      // Dynamically load XLSX library for parsing the export file
       await new Promise((resolve, reject) => {
         if (window.XLSX) return resolve();
         const script = document.createElement('script');
@@ -776,8 +1025,180 @@ export default function App() {
           const workbook = window.XLSX.read(data, { type: 'array' });
           const firstSheetName = workbook.SheetNames[0];
           const worksheet = workbook.Sheets[firstSheetName];
-          // Force the parser to return the formatted text strings (e.g. "11:30:00 PM") 
-          // instead of Excel's underlying serial numbers.
+          const json = window.XLSX.utils.sheet_to_json(worksheet, { defval: "", raw: false }); 
+
+          const parsedSlotsRaw = json.map((row, index) => {
+             const newRow = { ...row, id: index };
+             
+             if (newRow['Time'] !== undefined) {
+                 newRow['Time'] = formatTo12HrWithSeconds(newRow['Time']);
+             } else if (newRow['Start Time'] !== undefined) {
+                 newRow['Start Time'] = formatTo12HrWithSeconds(newRow['Start Time']);
+             }
+             
+             const comments = (row['Comments'] || '').toString().trim();
+             const commentsLower = comments.toLowerCase();
+             
+             if (commentsLower.includes('hold')) {
+                 newRow['Status'] = 'Hold';
+             } else if (commentsLower.includes('booked')) {
+                 newRow['Status'] = 'Booked';
+             } else if (!comments) {
+                 newRow['Status'] = 'Not Booked';
+             } else {
+                 newRow['Status'] = 'Not Booked';
+             }
+
+             return newRow;
+          });
+
+          // Filter out any slots that are in the past
+          const filteredSlots = parsedSlotsRaw.filter(row => {
+             const dateStr = formatTmDate(row['Date'] || row['Start Date']);
+             const timeStr = row['Time'] || row['Start Time'];
+             
+             if (!dateStr || !timeStr) return true;
+
+             const normTime = normalizeTimeForComparison(timeStr);
+             if (!normTime) return true;
+
+             const [hours, minutes] = normTime.split(':').map(Number);
+             
+             // Use Eastern Time as baseline for facility 7411 (AVRO)
+             const nowStr = new Date().toLocaleString("en-US", { timeZone: 'America/New_York' });
+             const now = new Date(nowStr);
+             
+             const [year, month, day] = dateStr.split('-').map(Number);
+             if (!year || !month || !day) return true;
+
+             const slotDate = new Date(year, month - 1, day, hours, minutes, 0);
+             
+             return slotDate >= now;
+          }).map((row, index) => ({ ...row, id: index })); 
+
+          setSlotMatrix(filteredSlots);
+          alert(`Success! Loaded ${filteredSlots.length} active (future) slots.`);
+        } catch (err) {
+          console.error(err);
+          alert("Error parsing the Capacity Matrix file. Please ensure it is a valid CSV or XLSX format.");
+        }
+      };
+      reader.readAsArrayBuffer(file);
+    } catch (err) {
+      alert("Failed to load Excel parsing library.");
+    }
+    e.target.value = null;
+  };
+
+  const handleSlotTMSyncUpload = async (e) => {
+    const file = e.target.files[0];
+    if (!file) return;
+
+    try {
+      await new Promise((resolve, reject) => {
+        if (window.XLSX) return resolve();
+        const script = document.createElement('script');
+        script.src = 'https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js';
+        script.onload = resolve;
+        script.onerror = reject;
+        document.head.appendChild(script);
+      });
+
+      const reader = new FileReader();
+      reader.onload = (event) => {
+        try {
+          const data = new Uint8Array(event.target.result);
+          const workbook = window.XLSX.read(data, { type: 'array' });
+          const firstSheetName = workbook.SheetNames[0];
+          const worksheet = workbook.Sheets[firstSheetName];
+          const json = window.XLSX.utils.sheet_to_json(worksheet, { defval: "", raw: false }); 
+
+          if (json.length === 0) {
+            alert("Error: The uploaded TM Export file is empty.");
+            return;
+          }
+
+          setSlotMatrix(prevMatrix => {
+              const localTmRows = json.map(r => ({...r, _used: false}));
+              
+              return prevMatrix.map(slot => {
+                  const matchIndex = localTmRows.findIndex(row => {
+                      if (row._used) return false;
+                      
+                      const tmDateNorm = formatTmDate(row['Date'] || row['Start Date']);
+                      const tmTimeNorm = normalizeTimeForComparison(row['Time'] || row['Start Time']);
+                      const tmFacility = String(row['Facility ID'] || row['Location'] || '').trim();
+
+                      const slotDateNorm = formatTmDate(slot['Date'] || slot['Start Date']);
+                      const slotTimeNorm = normalizeTimeForComparison(slot['Time'] || slot['Start Time']);
+                      const slotFacility = String(slot['Facility ID'] || slot['Location'] || '').trim();
+
+                      const facMatch = (slotFacility === tmFacility) || 
+                                       (!tmFacility && slotFacility === '7411') || 
+                                       (!slotFacility && tmFacility === '7411');
+
+                      return facMatch && (slotDateNorm === tmDateNorm) && (slotTimeNorm === tmTimeNorm);
+                  });
+
+                  if (matchIndex !== -1) {
+                      localTmRows[matchIndex]._used = true; 
+                      const tmRow = localTmRows[matchIndex];
+                      
+                      let newStatus = slot['Status'];
+                      if (String(tmRow['Status']).trim().toLowerCase() === 'scheduled') {
+                          newStatus = 'Booked';
+                      }
+                      
+                      return {
+                          ...slot,
+                          'Appointment ID': tmRow['Appointment ID'] || slot['Appointment ID'],
+                          'Type': tmRow['Type'] || slot['Type'],
+                          'SCAC Code': tmRow['SCAC Code'] || tmRow['Carrier'] || slot['SCAC Code'],
+                          'Number of Skids': tmRow['Number of Skids'] !== undefined && tmRow['Number of Skids'] !== "" ? String(tmRow['Number of Skids']) : slot['Number of Skids'],
+                          'Purchasing Doc.': tmRow['Purchasing Doc.'] || slot['Purchasing Doc.'],
+                          'Freight Order': tmRow['Freight Order'] || slot['Freight Order'],
+                          'Vendor Name': tmRow['Vendor Name'] || slot['Vendor Name'],
+                          'Status': newStatus
+                      };
+                  }
+                  return slot;
+              });
+          });
+          
+          alert(`Success! TM Export processed and slots updated.`);
+        } catch (err) {
+          console.error(err);
+          alert("Error parsing the TM Export file. Please ensure it is a valid CSV or XLSX format.");
+        }
+      };
+      reader.readAsArrayBuffer(file);
+    } catch (err) {
+      alert("Failed to load Excel parsing library.");
+    }
+    e.target.value = null;
+  };
+
+  const handleTMSyncUpload = async (e) => {
+    const file = e.target.files[0];
+    if (!file) return;
+
+    try {
+      await new Promise((resolve, reject) => {
+        if (window.XLSX) return resolve();
+        const script = document.createElement('script');
+        script.src = 'https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js';
+        script.onload = resolve;
+        script.onerror = reject;
+        document.head.appendChild(script);
+      });
+
+      const reader = new FileReader();
+      reader.onload = (event) => {
+        try {
+          const data = new Uint8Array(event.target.result);
+          const workbook = window.XLSX.read(data, { type: 'array' });
+          const firstSheetName = workbook.SheetNames[0];
+          const worksheet = workbook.Sheets[firstSheetName];
           const json = window.XLSX.utils.sheet_to_json(worksheet, { defval: "", raw: false }); 
           
           if (json.length === 0) {
@@ -785,37 +1206,41 @@ export default function App() {
             alert("Error: The uploaded TM Export file is empty.");
             return;
           }
-
-          const headers = Object.keys(json[0]);
-          const hasRequiredColumns = headers.includes('Freight Order') || headers.includes('Purchasing Doc.');
-          const hasApptIdColumn = headers.includes('Appointment ID');
-
-          if (!hasRequiredColumns || !hasApptIdColumn) {
-             setTmExportError(true);
-             alert("Error: Invalid file format.\n\nPlease ensure you are uploading the official SAP TM Export. The file must contain 'Appointment ID' and either 'Freight Order' or 'Purchasing Doc.' columns.");
-             return;
-          }
           
           setTmExportError(false);
           let syncCount = 0;
           let missingIdCount = 0;
+
+          const getVal = (row, matchers) => {
+              for (const m of matchers) {
+                  if (row[m] !== undefined && row[m] !== "") return row[m];
+              }
+              const rowKeys = Object.keys(row);
+              for (const m of matchers) {
+                  const found = rowKeys.find(k => k.toLowerCase().includes(m.toLowerCase()));
+                  if (found && row[found] !== undefined && row[found] !== "") return row[found];
+              }
+              return null;
+          };
           
           setAllRequests(prev => prev.map(req => {
             const reqIdentifiers = req.idValue.split(',').map(s => s.trim());
             const tmRow = json.find(row => {
-              const tmFo = row['Freight Order'] ? String(row['Freight Order']).trim() : null;
-              const tmPo = row['Purchasing Doc.'] ? String(row['Purchasing Doc.']).trim() : null;
+              const rawFo = getVal(row, ['Freight Order', 'Document', 'FO']);
+              const rawPo = getVal(row, ['Purchasing Doc', 'PO']);
               
-              // 1. Check for standard exact match
+              const tmFo = rawFo ? String(rawFo).trim() : null;
+              const tmPo = rawPo ? String(rawPo).trim() : null;
+              
               if ((tmFo && tmFo !== '99999' && reqIdentifiers.includes(tmFo)) || 
                   (tmPo && tmPo !== '99999' && reqIdentifiers.includes(tmPo))) {
                 return true;
               }
 
-              // 2. Check for "99999" fallback match in Comments
               if (tmFo === '99999' || tmPo === '99999') {
-                 const comments = row['Comments'] ? String(row['Comments']).trim() : '';
-                 const poMatch = comments.match(/PO\s*(\d+)/i);
+                 const comments = getVal(row, ['Comments', 'Notes']);
+                 const commentsStr = comments ? String(comments).trim() : '';
+                 const poMatch = commentsStr.match(/PO\s*(\d+)/i);
                  if (poMatch && poMatch[1] && reqIdentifiers.includes(poMatch[1])) {
                      return true;
                  }
@@ -826,34 +1251,44 @@ export default function App() {
 
             if (tmRow) {
               syncCount++;
-              const apptId = tmRow['Appointment ID'] ? String(tmRow['Appointment ID']).trim() : '';
+              const rawAppt = getVal(tmRow, ['Appointment ID', 'Appt']);
+              const apptId = rawAppt ? String(rawAppt).trim() : '';
               if (!apptId) missingIdCount++;
 
-              let finalSkidCount = tmRow['Number of Skids'] != null && tmRow['Number of Skids'] !== "" 
-                ? String(tmRow['Number of Skids']) 
-                : req.skidCount;
+              const rawSkids = getVal(tmRow, ['Number of Skids', 'Skids', 'Quantity']);
+              let finalSkidCount = rawSkids != null ? String(rawSkids) : req.skidCount;
 
-              const tmFo = tmRow['Freight Order'] ? String(tmRow['Freight Order']).trim() : null;
-              const tmPo = tmRow['Purchasing Doc.'] ? String(tmRow['Purchasing Doc.']).trim() : null;
+              const rawFo = getVal(tmRow, ['Freight Order', 'Document', 'FO']);
+              const rawPo = getVal(tmRow, ['Purchasing Doc', 'PO']);
+              const tmFo = rawFo ? String(rawFo).trim() : null;
+              const tmPo = rawPo ? String(rawPo).trim() : null;
 
               if (tmFo === '99999' || tmPo === '99999') {
-                 const comments = tmRow['Comments'] ? String(tmRow['Comments']).trim() : '';
-                 const pcsMatch = comments.match(/(\d+)\s*PCS/i);
+                 const comments = getVal(tmRow, ['Comments', 'Notes']);
+                 const commentsStr = comments ? String(comments).trim() : '';
+                 const pcsMatch = commentsStr.match(/(\d+)\s*PCS/i);
                  if (pcsMatch && pcsMatch[1]) {
                     finalSkidCount = pcsMatch[1];
                  }
               }
 
+              const vendor = getVal(tmRow, ['Vendor Name', 'Vendor', 'Shipper']);
+              const carrier = getVal(tmRow, ['SCAC Code', 'Carrier', 'SCAC']);
+              const loadType = getVal(tmRow, ['Type', 'Load Type']);
+              const facName = getVal(tmRow, ['Facility Name', 'Location']);
+              const facId = getVal(tmRow, ['Facility ID']);
+              const destStr = facName ? (facId ? `${facId} - ${facName}` : facName) : req.destination;
+              const comments = getVal(tmRow, ['Comments', 'Notes']);
+
               return {
                 ...req,
                 appointmentId: apptId || req.appointmentId || '',
-                // Ensure TM Export only updates the APPT ID and nothing else related to dates
                 skidCount: finalSkidCount,
-                vendor: tmRow['Vendor Name'] || req.vendor,
-                carrier: tmRow['SCAC Code'] || tmRow['Carrier'] || req.carrier,
-                loadType: tmRow['Type'] || req.loadType,
-                destination: tmRow['Facility Name'] ? `${tmRow['Facility ID']} - ${tmRow['Facility Name']}` : req.destination,
-                comments: tmRow['Comments'] || req.comments,
+                vendor: vendor || req.vendor,
+                carrier: carrier || req.carrier,
+                loadType: loadType || req.loadType,
+                destination: destStr || req.destination,
+                comments: comments || req.comments,
                 tmSyncError: !apptId,
                 validationError: false
               };
@@ -916,9 +1351,11 @@ export default function App() {
       if (filters.carrier && !(req.carrier || '').toLowerCase().includes(filters.carrier.toLowerCase())) return false;
       if (filters.idValue && !req.idValue.toLowerCase().includes(filters.idValue.toLowerCase())) return false;
       if (filters.destination && !req.destination.toLowerCase().includes(filters.destination.toLowerCase())) return false;
+      if (filters.loadType && !(req.loadType || '').toLowerCase().includes(filters.loadType.toLowerCase())) return false;
       if (filters.appointmentDate && req.appointmentDate !== filters.appointmentDate) return false;
       if (filters.skidCount && !req.skidCount.toString().includes(filters.skidCount)) return false;
       if (filters.timeSlot1 && !req.timeSlot1.toLowerCase().includes(filters.timeSlot1.toLowerCase())) return false;
+      if (filters.comments && !(req.comments || '').toLowerCase().includes(filters.comments.toLowerCase())) return false;
       if (filters.confirmedTime && !(req.confirmedTimeSlot || '').toLowerCase().includes(filters.confirmedTime.toLowerCase())) return false;
       if (filters.appointmentId && !(req.appointmentId || '').toLowerCase().includes(filters.appointmentId.toLowerCase())) return false;
       return true;
@@ -1057,9 +1494,11 @@ export default function App() {
 
     let updatedRequests = [...allRequests];
 
+    // Group selected requests by the Original Source File (the exact email dropped in)
     const groupedReqs = {};
     selectedPendingReqs.forEach(req => {
-      const key = req.carrierEmail ? req.carrierEmail.toLowerCase().trim() : `${req.vendor}_${req.carrier}`;
+      // Fallback to carrierEmail if sourceFile isn't available, but sourceFile should always be there for dropped emails
+      const key = req.sourceFile || (req.carrierEmail ? req.carrierEmail.toLowerCase().trim() : `${req.vendor}_${req.carrier}`);
       if (!groupedReqs[key]) groupedReqs[key] = [];
       groupedReqs[key].push(req);
     });
@@ -1075,7 +1514,8 @@ export default function App() {
        if (!subject.toUpperCase().startsWith('RE:')) {
          subject = `RE: ${subject}`;
        }
-       if (group.length > 1) {
+       // If there are multiple shipments in this SPECIFIC email thread, add a suffix
+       if (group.length > 1 && !subject.includes('Shipments)')) {
          subject = `RE: Load Booking Request Confirmations (${group.length} Shipments) - ${firstReq.destination}`;
        }
 
@@ -1133,13 +1573,15 @@ export default function App() {
        const link = document.createElement("a");
        link.href = url;
        
-       link.download = `Reply_Consolidated_${firstReq.carrier ? firstReq.carrier.replace(/[^a-z0-9]/gi, '_') : 'Carrier'}.eml`;
+       // Name the file based on the original source file so it's clear what it replies to
+       link.download = `Reply_${firstReq.sourceFile ? firstReq.sourceFile.replace(/\.[^/.]+$/, "") : firstReq.idValue}.eml`;
        
        document.body.appendChild(link);
        link.click();
        document.body.removeChild(link);
        URL.revokeObjectURL(url);
 
+       // Small delay to allow the browser to process multiple downloads sequentially
        await new Promise(resolve => setTimeout(resolve, 300));
     }
 
@@ -1197,6 +1639,62 @@ export default function App() {
     URL.revokeObjectURL(url);
   };
 
+  const handleSlotFilterChange = (key, value) => {
+      setSlotFilters(prev => {
+          const currentValues = prev[key] || [];
+          const newValues = currentValues.includes(value)
+              ? currentValues.filter(v => v !== value)
+              : [...currentValues, value];
+          return { ...prev, [key]: newValues };
+      });
+  };
+
+  const getUniqueSlotValues = (key) => {
+      const allValues = slotMatrix.map(slot => String(slot[key] || '').trim()).filter(Boolean);
+      return [...new Set(allValues)].sort();
+  };
+
+  const processedSlots = useMemo(() => {
+      return slotMatrix.filter(slot => {
+          if (slotFilters.facilityId.length > 0 && !slotFilters.facilityId.includes(String(slot['Facility ID'] || '').trim())) return false;
+          if (slotFilters.date.length > 0 && !slotFilters.date.includes(String(slot.Date || slot['Start Date'] || slot.date || '').trim())) return false;
+          
+          if (slotFilters.status.length > 0) {
+              const s = String(slot.Status || '').trim() || 'Not Booked';
+              if (!slotFilters.status.includes(s)) return false;
+          }
+
+          if (slotFilters.vendorName.length > 0) {
+              const vn = String(slot['Vendor Name'] || '').trim();
+              if (!slotFilters.vendorName.includes(vn)) return false;
+          }
+          
+          if (slotFilters.freightOrder.length > 0) {
+              const fo = String(slot['Freight Order'] || '').trim();
+              if (!slotFilters.freightOrder.includes(fo)) return false;
+          }
+          
+          if (slotFilters.purchasingDoc.length > 0) {
+              const po = String(slot['Purchasing Doc.'] || '').trim();
+              if (!slotFilters.purchasingDoc.includes(po)) return false;
+          }
+
+          return true;
+      });
+  }, [slotMatrix, slotFilters]);
+
+  const slotHeaders = useMemo(() => {
+      if (slotMatrix.length === 0) return [];
+      const headers = new Set();
+      slotMatrix.forEach(r => Object.keys(r).forEach(k => { if(k !== 'id') headers.add(k) }));
+      const headerArr = Array.from(headers);
+      if (headerArr.includes('Status')) {
+          headerArr.splice(headerArr.indexOf('Status'), 1);
+          headerArr.push('Status');
+      }
+      return headerArr;
+  }, [slotMatrix]);
+
   const currentDestinationOptions = formData.region === 'East' ? EAST_DESTINATIONS : (formData.region === 'West' ? WEST_DESTINATIONS : []);
   const needsApplianceSelection = formData.destination.includes('DFC') || formData.destination.includes('MDO');
 
@@ -1213,13 +1711,19 @@ export default function App() {
           </div>
         </div>
         <div className="flex items-center gap-4">
-           {viewMode === 'vendor' ? (
-             <button onClick={() => setViewMode('admin')} className="flex items-center gap-2 bg-orange-800 bg-opacity-30 hover:bg-opacity-50 px-3 py-1.5 rounded-full text-xs font-medium transition-colors border border-orange-400">
-               <LayoutDashboard className="w-4 h-4"/> Email Compiler
-             </button>
-           ) : (
+           {viewMode !== 'vendor' && (
              <button onClick={() => setViewMode('vendor')} className="flex items-center gap-2 bg-white text-[#f96302] hover:bg-orange-50 px-3 py-1.5 rounded-full text-xs font-bold transition-colors">
                <ArrowLeft className="w-4 h-4"/> Back to Form
+             </button>
+           )}
+           {viewMode !== 'slots' && (
+             <button onClick={() => setViewMode('slots')} className="flex items-center gap-2 bg-orange-800 bg-opacity-30 hover:bg-opacity-50 px-3 py-1.5 rounded-full text-xs font-medium transition-colors border border-orange-400">
+               <Calendar className="w-4 h-4"/> 7411 Appointment Slots
+             </button>
+           )}
+           {viewMode !== 'admin' && (
+             <button onClick={() => setViewMode('admin')} className="flex items-center gap-2 bg-orange-800 bg-opacity-30 hover:bg-opacity-50 px-3 py-1.5 rounded-full text-xs font-medium transition-colors border border-orange-400">
+               <LayoutDashboard className="w-4 h-4"/> Email Compiler
              </button>
            )}
         </div>
@@ -1283,7 +1787,6 @@ export default function App() {
                         return;
                       }
 
-                      // Validation: Check for missing Appt IDs
                       const missingFields = selectedPendingReqs.filter(r => !r.appointmentId?.trim());
                       
                       if (missingFields.length > 0) {
@@ -1345,6 +1848,9 @@ export default function App() {
                         <th className="px-4 py-3 cursor-pointer hover:bg-slate-200 transition-colors select-none" onClick={() => requestSort('destination')}>
                           <div className="flex items-center gap-1">Destination {getSortIcon('destination')}</div>
                         </th>
+                        <th className="px-4 py-3 cursor-pointer hover:bg-slate-200 transition-colors select-none" onClick={() => requestSort('loadType')}>
+                          <div className="flex items-center gap-1">Load Type {getSortIcon('loadType')}</div>
+                        </th>
                         <th className="px-4 py-3 cursor-pointer hover:bg-slate-200 transition-colors select-none" onClick={() => requestSort('appointmentDate')}>
                           <div className="flex items-center gap-1">Target Date {getSortIcon('appointmentDate')}</div>
                         </th>
@@ -1353,6 +1859,9 @@ export default function App() {
                         </th>
                         <th className="px-4 py-3 cursor-pointer hover:bg-slate-200 transition-colors select-none" onClick={() => requestSort('timeSlot1')}>
                           <div className="flex items-center gap-1">Pref Time {getSortIcon('timeSlot1')}</div>
+                        </th>
+                        <th className="px-4 py-3 cursor-pointer hover:bg-slate-200 transition-colors select-none" onClick={() => requestSort('comments')}>
+                          <div className="flex items-center gap-1">Comments {getSortIcon('comments')}</div>
                         </th>
                         <th className="px-4 py-3 cursor-pointer hover:bg-slate-200 transition-colors select-none text-[#f96302]">
                           <div className="flex items-center gap-1">Confirmed Time</div>
@@ -1387,6 +1896,13 @@ export default function App() {
                           <input type="text" placeholder="Filter Dest..." className="w-full px-2 py-1.5 rounded border border-slate-300 text-xs font-normal outline-none focus:border-[#f96302]" value={filters.destination} onChange={e => setFilters({...filters, destination: e.target.value})} />
                         </th>
                         <th className="px-2 py-2">
+                          <select className="w-full px-2 py-1.5 rounded border border-slate-300 text-xs font-normal outline-none focus:border-[#f96302]" value={filters.loadType} onChange={e => setFilters({...filters, loadType: e.target.value})}>
+                            <option value="">All</option>
+                            <option value="Live Load">Live Load</option>
+                            <option value="Drop Load">Drop Load</option>
+                          </select>
+                        </th>
+                        <th className="px-2 py-2">
                           <input type="date" className="w-full px-2 py-1.5 rounded border border-slate-300 text-xs font-normal outline-none focus:border-[#f96302]" value={filters.appointmentDate} onChange={e => setFilters({...filters, appointmentDate: e.target.value})} />
                         </th>
                         <th className="px-2 py-2">
@@ -1395,12 +1911,15 @@ export default function App() {
                         <th className="px-2 py-2">
                           <input type="text" placeholder="Filter Time..." className="w-full px-2 py-1.5 rounded border border-slate-300 text-xs font-normal outline-none focus:border-[#f96302]" value={filters.timeSlot1} onChange={e => setFilters({...filters, timeSlot1: e.target.value})} />
                         </th>
+                        <th className="px-2 py-2">
+                          <input type="text" placeholder="Filter Comments..." className="w-full px-2 py-1.5 rounded border border-slate-300 text-xs font-normal outline-none focus:border-[#f96302]" value={filters.comments} onChange={e => setFilters({...filters, comments: e.target.value})} />
+                        </th>
                         <th className="px-2 py-2"></th>
                         <th className="px-2 py-2">
                           <input type="text" placeholder="Filter Appt ID..." className="w-full px-2 py-1.5 rounded border border-slate-300 text-xs font-normal outline-none focus:border-[#f96302]" value={filters.appointmentId} onChange={e => setFilters({...filters, appointmentId: e.target.value})} />
                         </th>
                         <th className="px-2 py-2 text-center">
-                           <button onClick={() => setFilters({status: '', vendor: '', carrier: '', idValue: '', destination: '', appointmentDate: '', skidCount: '', timeSlot1: '', confirmedTime: '', appointmentId: ''})} className="w-full px-2 py-1.5 bg-white border border-slate-300 hover:bg-slate-50 rounded text-slate-600 text-xs font-medium transition-colors flex justify-center items-center gap-1">
+                           <button onClick={() => setFilters({status: '', vendor: '', carrier: '', idValue: '', destination: '', loadType: '', appointmentDate: '', skidCount: '', timeSlot1: '', comments: '', confirmedTime: '', appointmentId: ''})} className="w-full px-2 py-1.5 bg-white border border-slate-300 hover:bg-slate-50 rounded text-slate-600 text-xs font-medium transition-colors flex justify-center items-center gap-1">
                              <X className="w-3.5 h-3.5"/> Clear
                            </button>
                         </th>
@@ -1409,7 +1928,7 @@ export default function App() {
                     <tbody className="divide-y divide-slate-100">
                       {allRequests.length === 0 ? (
                         <tr>
-                           <td colSpan="13" className="px-4 py-16 text-center">
+                           <td colSpan="15" className="px-4 py-16 text-center">
                               <div className="flex flex-col items-center justify-center text-slate-400">
                                  <UploadCloud className="w-16 h-16 mb-4 text-slate-300" />
                                  <p className="text-lg font-medium text-slate-500">No requests compiled yet.</p>
@@ -1419,7 +1938,7 @@ export default function App() {
                         </tr>
                       ) : processedRequests.length === 0 ? (
                         <tr>
-                           <td colSpan="13" className="px-4 py-16 text-center text-slate-500 font-medium">
+                           <td colSpan="15" className="px-4 py-16 text-center text-slate-500 font-medium">
                               No requests match your current filters.
                            </td>
                         </tr>
@@ -1446,8 +1965,23 @@ export default function App() {
                             </td>
                             <td className="px-4 py-3 text-slate-600 text-xs truncate max-w-[120px]" title={req.vendor}>{req.vendor || '--'}</td>
                             <td className="px-4 py-3 text-slate-600 text-xs truncate max-w-[120px]" title={req.carrier}>{req.carrier || '--'}</td>
-                            <td className="px-4 py-3 font-medium text-slate-800">{req.idValue}</td>
+                            <td className="px-4 py-3 font-medium text-slate-800">
+                              <div className="flex flex-col gap-1">
+                                {req.idValue.split(',').map((id, idIndex) => (
+                                  <span key={idIndex} className="block whitespace-nowrap">{id.trim()}</span>
+                                ))}
+                              </div>
+                            </td>
                             <td className="px-4 py-3 text-slate-600">{req.destination?.split(' - ')[1] || req.destination}</td>
+                            <td className="px-4 py-3 text-slate-600 whitespace-nowrap">
+                              {req.loadType === 'Live Load' ? (
+                                <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-xs font-bold bg-blue-50 text-blue-700 border border-blue-200"><Truck className="w-3 h-3"/> Live</span>
+                              ) : req.loadType === 'Drop Load' ? (
+                                <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-xs font-bold bg-purple-50 text-purple-700 border border-purple-200"><ArrowDown className="w-3 h-3"/> Drop</span>
+                              ) : (
+                                req.loadType || '--'
+                              )}
+                            </td>
                             <td className="px-4 py-3 text-slate-800 font-medium whitespace-nowrap">{req.appointmentDate}</td>
                             
                             <td className="px-4 py-3">
@@ -1461,6 +1995,10 @@ export default function App() {
                             
                             <td className="px-4 py-3 text-xs text-slate-600 min-w-[120px]">
                                {req.timeSlot1}
+                            </td>
+
+                            <td className="px-4 py-3 text-xs text-slate-600 max-w-[150px] truncate" title={req.comments}>
+                               {req.comments || '--'}
                             </td>
 
                             <td className="px-4 py-3 min-w-[160px]">
@@ -1536,7 +2074,16 @@ export default function App() {
                                   </button>
                                 </div>
                               ) : (
-                                <span className="text-xs text-slate-400 italic">Processed</span>
+                                <div className="flex items-center justify-center gap-1">
+                                  <span className="text-xs text-slate-400 italic">Processed</span>
+                                  <button 
+                                    onClick={() => setAllRequests(prev => prev.map(r => r.id === req.id ? { ...r, status: 'Requested' } : r))}
+                                    className="p-1.5 text-slate-400 hover:text-[#f96302] hover:bg-orange-50 rounded transition-colors" 
+                                    title="Revert to Requested"
+                                  >
+                                    <RotateCcw className="w-4 h-4" />
+                                  </button>
+                                </div>
                               )}
                             </td>
                           </tr>
@@ -1606,7 +2153,9 @@ export default function App() {
               <h3 className="font-bold text-lg">Send Bulk Confirmations</h3>
             </div>
             <div className="p-6 flex flex-col gap-4">
-               <p className="text-sm text-slate-600">You are about to generate combined confirmation drafts for <strong>{selectedPendingCount}</strong> request(s) consolidated into <strong>{new Set(selectedPendingReqs.map(r => r.carrierEmail ? r.carrierEmail.toLowerCase().trim() : `${r.vendor}_${r.carrier}`)).size}</strong> email thread(s) by carrier.</p>
+               <p className="text-sm text-slate-600">You are about to generate confirmation drafts for <strong>{selectedPendingCount}</strong> request(s).</p>
+               
+               <p className="text-sm text-slate-600">Replies will be automatically grouped by their original email source, generating <strong>{new Set(selectedPendingReqs.map(r => r.sourceFile || r.carrierEmail)).size}</strong> distinct email thread(s).</p>
                
                <div className="bg-blue-50 text-blue-800 p-3 rounded-md border border-blue-200 text-sm">
                  <strong>Note:</strong> Generating multiple drafts will trigger multiple file downloads. Please allow your browser to "Download Multiple Files" if prompted at the top of your screen.
@@ -1737,13 +2286,32 @@ export default function App() {
                         </div>
                       </div>
                     )}
+
+                    {formData.region === 'East' && formData.destination.includes('7340') && (
+                      <div className="mt-4 pt-4 border-t border-slate-200">
+                        <label className="block text-sm font-bold text-slate-700">Bolton 7340 Load Category <span className="text-red-500">*</span></label>
+                        <div className="flex gap-4 mt-2">
+                          {['Vendor', 'Innovation Centre (IC)', 'Miscellaneous'].map(type => (
+                            <label key={type} className={`flex-1 flex flex-col items-center justify-center p-3 border rounded-lg cursor-pointer transition-colors ${formData.boltonTrailerType === type ? 'border-[#f96302] bg-orange-50' : 'hover:bg-slate-50'}`}>
+                              <input type="radio" name="boltonTrailerType" value={type} className="hidden" checked={formData.boltonTrailerType === type} onChange={handleInputChange} />
+                              <span className={`font-bold text-center text-sm ${formData.boltonTrailerType === type ? 'text-orange-900' : 'text-slate-700'}`}>{type}</span>
+                            </label>
+                          ))}
+                        </div>
+                        {formErrors.boltonTrailerType && <p className="text-red-500 text-xs mt-1">{formErrors.boltonTrailerType}</p>}
+                      </div>
+                    )}
+
                   </div>
                 </div>
 
                 <div className="space-y-4">
                   {formData.ids.map((idObj, index) => {
                     const currentDateError = idObj.date ? checkDateError(idObj.date, formData.region) : null;
-                    const currentTimeError = idObj.timeSlot ? checkTimeSlotError(idObj.date, idObj.timeSlot, formData.region) : null;
+                    const is247DropFacility = formData.region === 'East' && 
+                                              (formData.destination.includes('7275') || formData.destination.includes('7340')) && 
+                                              formData.loadType === 'Drop Load';
+                    const currentTimeError = idObj.timeSlot ? checkTimeSlotError(idObj.date, idObj.timeSlot, formData.region, is247DropFacility) : null;
                     
                     return (
                     <div key={index} className="p-5 border border-slate-200 rounded-xl bg-slate-50 shadow-sm relative">
@@ -1781,7 +2349,8 @@ export default function App() {
                                     type="text" 
                                     value={ident.value} 
                                     onChange={(e) => handleIdentifierChange(index, identIdx, 'value', e.target.value)} 
-                                    placeholder={ident.type === 'Shipment ID' ? '6100XXXX' : 'PO Number...'}
+                                    onPaste={(e) => handleIdentifierPaste(e, index, identIdx)}
+                                    placeholder={ident.type === 'Shipment ID' ? '6100XXXXXX' : 'PO Number...'}
                                     className={`flex-1 p-2.5 border rounded-lg outline-none shadow-sm text-sm transition-colors ${formErrors[`id_${index}_ident_${identIdx}_value`] ? 'border-red-500 bg-red-50' : 'border-slate-300 focus:border-[#f96302]'}`}
                                   />
                                   {identIdx > 0 && (
@@ -1834,28 +2403,40 @@ export default function App() {
                             <div className="relative">
                               <Clock className="w-4 h-4 absolute left-3 top-3 text-slate-400" />
                               <select 
-                                value={idObj.timeSlot} 
+                                value={is247DropFacility ? '24/7 Drop Allowed' : idObj.timeSlot} 
                                 onChange={(e) => handleIdChange(index, 'timeSlot', e.target.value)} 
-                                className={`w-full pl-9 p-2.5 border rounded-lg outline-none shadow-sm text-sm bg-white transition-colors ${(formErrors[`id_${index}_timeSlot`] || currentTimeError) ? 'border-red-500 bg-red-50 text-red-900' : 'border-slate-300 focus:border-[#f96302]'}`}
+                                disabled={is247DropFacility}
+                                className={`w-full pl-9 p-2.5 border rounded-lg outline-none shadow-sm text-sm transition-colors disabled:bg-slate-100 disabled:cursor-not-allowed ${is247DropFacility ? 'border-slate-200 text-slate-600 font-bold' : (formErrors[`id_${index}_timeSlot`] || currentTimeError) ? 'border-red-500 bg-red-50 text-red-900' : 'border-slate-300 focus:border-[#f96302] bg-white'}`}
                               >
-                                <option value="">-- Select Time --</option>
-                                {ALL_TIME_SLOTS.map(s => {
-                                  const isAvailable = getAvailableTimeSlots(idObj.date, formData.region).includes(s);
-                                  return (
-                                    <option key={s} value={s} disabled={!isAvailable}>
-                                      {s} {!isAvailable ? '(Passed)' : ''}
-                                    </option>
-                                  );
-                                })}
+                                {is247DropFacility ? (
+                                    <option value="24/7 Drop Allowed">24/7 Drop Allowed</option>
+                                ) : (
+                                    <>
+                                        <option value="">-- Select Time --</option>
+                                        {ALL_TIME_SLOTS.map(s => {
+                                          const isAvailable = getAvailableTimeSlots(idObj.date, formData.region).includes(s);
+                                          return (
+                                            <option key={s} value={s} disabled={!isAvailable}>
+                                              {s} {!isAvailable ? '(Passed)' : ''}
+                                            </option>
+                                          );
+                                        })}
+                                    </>
+                                )}
                               </select>
                             </div>
-                            {currentTimeError && (
+                            {is247DropFacility && (
+                                <p className="text-xs text-blue-600 font-medium mt-1 flex items-center gap-1">
+                                    <CheckCircle2 className="w-3 h-3"/> Drop Loads can be dropped anytime 24/7
+                                </p>
+                            )}
+                            {currentTimeError && !is247DropFacility && (
                               <div className="mt-2 p-2.5 bg-red-50 border border-red-200 rounded-md flex items-start gap-2">
                                 <AlertTriangle className="w-4 h-4 text-red-600 flex-shrink-0 mt-0.5" />
                                 <p className="text-xs text-red-800 font-medium">{currentTimeError}</p>
                               </div>
                             )}
-                            {!currentTimeError && formErrors[`id_${index}_timeSlot`] && <p className="text-red-500 text-xs mt-1">{formErrors[`id_${index}_timeSlot`]}</p>}
+                            {!currentTimeError && !is247DropFacility && formErrors[`id_${index}_timeSlot`] && <p className="text-red-500 text-xs mt-1">{formErrors[`id_${index}_timeSlot`]}</p>}
                           </div>
 
                           <div className="space-y-2">
@@ -2064,6 +2645,119 @@ export default function App() {
                 </button>
               </div>
             </div>
+        </main>
+      )}
+
+      {/* --- 7411 Appointment Slots View --- */}
+      {viewMode === 'slots' && (
+        <main className="flex-1 overflow-y-auto p-6 transition-colors bg-slate-100">
+           <div className="max-w-[105rem] mx-auto">
+              <div className="flex flex-col md:flex-row justify-between items-start md:items-center mb-6 gap-4">
+                <div>
+                  <h2 className="text-2xl font-bold text-slate-800">7411 Appointment Slots</h2>
+                  <p className="text-sm text-slate-500">View and manage uploaded appointment capacity files.</p>
+                </div>
+                <div className="flex gap-2">
+                  <label className="flex items-center gap-2 bg-emerald-600 hover:bg-emerald-700 text-white px-5 py-2.5 rounded-lg shadow-sm font-medium transition-colors cursor-pointer">
+                     <UploadCloud className="w-5 h-5" /> Upload File
+                     <input type="file" accept=".csv,.xlsx" className="hidden" onChange={handleSlotMatrixUpload} />
+                  </label>
+                  <label className="flex items-center gap-2 bg-purple-600 hover:bg-purple-700 text-white px-5 py-2.5 rounded-lg shadow-sm font-medium transition-colors cursor-pointer">
+                     <CheckCircle2 className="w-5 h-5" /> Upload TM Export
+                     <input type="file" accept=".csv,.xlsx" className="hidden" onChange={handleSlotTMSyncUpload} />
+                  </label>
+                  {slotMatrix.length > 0 && (
+                    <button onClick={() => setSlotMatrix([])} className="flex items-center gap-2 bg-white border border-red-200 text-red-600 hover:bg-red-50 px-4 py-2.5 rounded-lg shadow-sm font-medium transition-colors">
+                       Clear Data
+                    </button>
+                  )}
+                </div>
+              </div>
+
+              {slotMatrix.length > 0 && (
+                 <div className="bg-white p-4 rounded-xl shadow-sm border border-slate-200 mb-6 flex flex-wrap items-center gap-2" ref={dropdownRef}>
+                     <div className="flex items-center gap-2 mr-4 text-slate-500 font-bold text-sm uppercase tracking-wider">
+                         <Filter className="w-4 h-4" /> Filters
+                     </div>
+                     <MultiSelectDropdown filterKey="facilityId" label="Facility ID" options={getUniqueSlotValues('Facility ID')} activeDropdown={activeDropdown} setActiveDropdown={setActiveDropdown} slotFilters={slotFilters} handleSlotFilterChange={handleSlotFilterChange} setSlotFilters={setSlotFilters} />
+                     <MultiSelectDropdown filterKey="date" label="Date" options={getUniqueSlotValues('Date')} activeDropdown={activeDropdown} setActiveDropdown={setActiveDropdown} slotFilters={slotFilters} handleSlotFilterChange={handleSlotFilterChange} setSlotFilters={setSlotFilters} />
+                     <MultiSelectDropdown filterKey="status" label="Status" options={['Not Booked', 'Hold', 'Booked']} activeDropdown={activeDropdown} setActiveDropdown={setActiveDropdown} slotFilters={slotFilters} handleSlotFilterChange={handleSlotFilterChange} setSlotFilters={setSlotFilters} />
+                     
+                     <div className="w-px h-8 bg-slate-200 mx-2 hidden md:block"></div>
+                     
+                     <MultiSelectDropdown filterKey="vendorName" label="Vendor Name" options={getUniqueSlotValues('Vendor Name')} activeDropdown={activeDropdown} setActiveDropdown={setActiveDropdown} slotFilters={slotFilters} handleSlotFilterChange={handleSlotFilterChange} setSlotFilters={setSlotFilters} />
+                     <MultiSelectDropdown filterKey="freightOrder" label="Freight Order" options={getUniqueSlotValues('Freight Order')} activeDropdown={activeDropdown} setActiveDropdown={setActiveDropdown} slotFilters={slotFilters} handleSlotFilterChange={handleSlotFilterChange} setSlotFilters={setSlotFilters} />
+                     <MultiSelectDropdown filterKey="purchasingDoc" label="Purchasing Doc." options={getUniqueSlotValues('Purchasing Doc.')} activeDropdown={activeDropdown} setActiveDropdown={setActiveDropdown} slotFilters={slotFilters} handleSlotFilterChange={handleSlotFilterChange} setSlotFilters={setSlotFilters} />
+
+                     {Object.values(slotFilters).some(arr => arr.length > 0) && (
+                         <button 
+                             onClick={() => setSlotFilters({facilityId: [], date: [], status: [], vendorName: [], freightOrder: [], purchasingDoc: []})}
+                             className="ml-auto flex items-center gap-1.5 text-xs font-bold text-slate-500 hover:text-slate-700 bg-slate-100 hover:bg-slate-200 px-3 py-2 rounded-lg transition-colors"
+                         >
+                             <X className="w-3.5 h-3.5" /> Clear All
+                         </button>
+                     )}
+                 </div>
+              )}
+              
+              <div className="bg-white rounded-xl shadow-sm border border-slate-200 overflow-hidden min-h-[400px]">
+                 {slotMatrix.length === 0 ? (
+                   <div className="flex flex-col items-center justify-center p-16 text-center">
+                     <Calendar className="w-16 h-16 mb-4 text-slate-300" />
+                     <p className="text-lg font-medium text-slate-500">No file loaded.</p>
+                     <p className="text-sm mt-1 text-slate-400">Upload your "7411 appointment slots" file to view its contents.</p>
+                   </div>
+                 ) : (
+                   <div className="overflow-x-auto">
+                     <table className="w-full text-sm text-left whitespace-nowrap">
+                       <thead className="bg-slate-50 text-slate-600 border-b border-slate-200 font-semibold uppercase text-xs">
+                         <tr>
+                           {slotHeaders.map(key => (
+                             <th key={key} className="px-4 py-3">{key}</th>
+                           ))}
+                         </tr>
+                       </thead>
+                       <tbody className="divide-y divide-slate-100">
+                         {processedSlots.length === 0 ? (
+                             <tr>
+                                 <td colSpan={slotHeaders.length} className="px-4 py-12 text-center text-slate-500 font-medium">
+                                     No slots match your current filters.
+                                 </td>
+                             </tr>
+                         ) : (
+                             processedSlots.map((slot) => (
+                               <tr key={slot.id} className="hover:bg-slate-50 transition-colors">
+                                 {slotHeaders.map(key => {
+                                    if (key === 'Status') {
+                                        const val = slot[key] || 'Not Booked';
+                                        let badgeClasses = 'bg-slate-100 text-slate-800 border-slate-200';
+                                        if (val === 'Hold') badgeClasses = 'bg-yellow-100 text-yellow-800 border-yellow-200';
+                                        else if (val === 'Booked') badgeClasses = 'bg-red-100 text-red-800 border-red-200';
+                                        else if (val === 'Not Booked') badgeClasses = 'bg-green-100 text-green-800 border-green-200';
+    
+                                        return (
+                                          <td key={key} className="px-4 py-3">
+                                            <span className={`px-2.5 py-1 rounded-full text-xs font-bold border ${badgeClasses}`}>
+                                              {val}
+                                            </span>
+                                          </td>
+                                        )
+                                    }
+                                    return (
+                                      <td key={key} className="px-4 py-3 text-slate-600">
+                                        {slot[key] || '--'}
+                                      </td>
+                                    )
+                                 })}
+                               </tr>
+                             ))
+                         )}
+                       </tbody>
+                     </table>
+                   </div>
+                 )}
+              </div>
+           </div>
         </main>
       )}
 
