@@ -233,7 +233,7 @@ const checkDateError = (dateStr, region) => {
 };
 
 const checkTimeSlotError = (dateStr, timeSlot, region, is247DropFacility) => {
-  if (is247DropFacility) return null; // Exempt from time validation
+  if (is247DropFacility) return null; 
   if (!timeSlot || !dateStr) return null;
   const availableSlots = getAvailableTimeSlots(dateStr, region);
   if (!availableSlots.includes(timeSlot)) {
@@ -354,11 +354,11 @@ export default function App() {
 
   const [filters, setFilters] = useState({
     status: '',
+    loadType: '',
     vendor: '',
     carrier: '',
     idValue: '',
     destination: '',
-    loadType: '',
     appointmentDate: '',
     skidCount: '',
     timeSlot1: '',
@@ -910,6 +910,7 @@ export default function App() {
         destination: extractedData["Destination"],
         applianceDropOff: extractedData["Appliance Drop Off"],
         loadType: extractedData["Load Type"],
+        boltonTrailerType: extractedData["Bolton Load Category"] || '',
         hasBol: extractedData["Has BOL"],
         bolFile: extractedData["BOL File"],
         vendor: extractedData["Vendor/Shipper"],
@@ -953,6 +954,7 @@ export default function App() {
         timeSlot1: formatTmTime(extractedData["1st Choice Time Slot"] || extractedData["Time Slot"]),
         applianceDropOff: extractedData["Appliance Drop Off"],
         loadType: extractedData["Load Type"],
+        boltonTrailerType: extractedData["Bolton Load Category"] || '',
         idType: extractedData["ID Type"],
         idValue: extractedData["ID Value"],
         hasBol: extractedData["Has BOL"],
@@ -1347,11 +1349,11 @@ export default function App() {
   const processedRequests = [...allRequests]
     .filter(req => {
       if (filters.status && req.status !== filters.status) return false;
+      if (filters.loadType && !(req.loadType || '').toLowerCase().includes(filters.loadType.toLowerCase())) return false;
       if (filters.vendor && !(req.vendor || '').toLowerCase().includes(filters.vendor.toLowerCase())) return false;
       if (filters.carrier && !(req.carrier || '').toLowerCase().includes(filters.carrier.toLowerCase())) return false;
       if (filters.idValue && !req.idValue.toLowerCase().includes(filters.idValue.toLowerCase())) return false;
       if (filters.destination && !req.destination.toLowerCase().includes(filters.destination.toLowerCase())) return false;
-      if (filters.loadType && !(req.loadType || '').toLowerCase().includes(filters.loadType.toLowerCase())) return false;
       if (filters.appointmentDate && req.appointmentDate !== filters.appointmentDate) return false;
       if (filters.skidCount && !req.skidCount.toString().includes(filters.skidCount)) return false;
       if (filters.timeSlot1 && !req.timeSlot1.toLowerCase().includes(filters.timeSlot1.toLowerCase())) return false;
@@ -1494,11 +1496,9 @@ export default function App() {
 
     let updatedRequests = [...allRequests];
 
-    // Group selected requests by the Original Source File (the exact email dropped in)
     const groupedReqs = {};
     selectedPendingReqs.forEach(req => {
-      // Fallback to carrierEmail if sourceFile isn't available, but sourceFile should always be there for dropped emails
-      const key = req.sourceFile || (req.carrierEmail ? req.carrierEmail.toLowerCase().trim() : `${req.vendor}_${req.carrier}`);
+      const key = req.sourceFile || req.id; 
       if (!groupedReqs[key]) groupedReqs[key] = [];
       groupedReqs[key].push(req);
     });
@@ -1514,8 +1514,7 @@ export default function App() {
        if (!subject.toUpperCase().startsWith('RE:')) {
          subject = `RE: ${subject}`;
        }
-       // If there are multiple shipments in this SPECIFIC email thread, add a suffix
-       if (group.length > 1 && !subject.includes('Shipments)')) {
+       if (group.length > 1) {
          subject = `RE: Load Booking Request Confirmations (${group.length} Shipments) - ${firstReq.destination}`;
        }
 
@@ -1573,15 +1572,13 @@ export default function App() {
        const link = document.createElement("a");
        link.href = url;
        
-       // Name the file based on the original source file so it's clear what it replies to
-       link.download = `Reply_${firstReq.sourceFile ? firstReq.sourceFile.replace(/\.[^/.]+$/, "") : firstReq.idValue}.eml`;
+       link.download = `Reply_Consolidated_${firstReq.carrier ? firstReq.carrier.replace(/[^a-z0-9]/gi, '_') : 'Carrier'}.eml`;
        
        document.body.appendChild(link);
        link.click();
        document.body.removeChild(link);
        URL.revokeObjectURL(url);
 
-       // Small delay to allow the browser to process multiple downloads sequentially
        await new Promise(resolve => setTimeout(resolve, 300));
     }
 
@@ -1836,6 +1833,9 @@ export default function App() {
                         <th className="px-4 py-3 cursor-pointer hover:bg-slate-200 transition-colors select-none" onClick={() => requestSort('status')}>
                           <div className="flex items-center gap-1">Status {getSortIcon('status')}</div>
                         </th>
+                        <th className="px-4 py-3 cursor-pointer hover:bg-slate-200 transition-colors select-none" onClick={() => requestSort('loadType')}>
+                          <div className="flex items-center gap-1">Load {getSortIcon('loadType')}</div>
+                        </th>
                         <th className="px-4 py-3 cursor-pointer hover:bg-slate-200 transition-colors select-none" onClick={() => requestSort('vendor')}>
                           <div className="flex items-center gap-1">Vendor {getSortIcon('vendor')}</div>
                         </th>
@@ -1848,9 +1848,6 @@ export default function App() {
                         <th className="px-4 py-3 cursor-pointer hover:bg-slate-200 transition-colors select-none" onClick={() => requestSort('destination')}>
                           <div className="flex items-center gap-1">Destination {getSortIcon('destination')}</div>
                         </th>
-                        <th className="px-4 py-3 cursor-pointer hover:bg-slate-200 transition-colors select-none" onClick={() => requestSort('loadType')}>
-                          <div className="flex items-center gap-1">Load Type {getSortIcon('loadType')}</div>
-                        </th>
                         <th className="px-4 py-3 cursor-pointer hover:bg-slate-200 transition-colors select-none" onClick={() => requestSort('appointmentDate')}>
                           <div className="flex items-center gap-1">Target Date {getSortIcon('appointmentDate')}</div>
                         </th>
@@ -1862,6 +1859,9 @@ export default function App() {
                         </th>
                         <th className="px-4 py-3 cursor-pointer hover:bg-slate-200 transition-colors select-none" onClick={() => requestSort('comments')}>
                           <div className="flex items-center gap-1">Comments {getSortIcon('comments')}</div>
+                        </th>
+                        <th className="px-4 py-3 select-none text-[#f96302]">
+                          <div className="flex items-center gap-1">SAP TM Comments</div>
                         </th>
                         <th className="px-4 py-3 cursor-pointer hover:bg-slate-200 transition-colors select-none text-[#f96302]">
                           <div className="flex items-center gap-1">Confirmed Time</div>
@@ -1884,6 +1884,13 @@ export default function App() {
                           </select>
                         </th>
                         <th className="px-2 py-2">
+                          <select className="w-full px-2 py-1.5 rounded border border-slate-300 text-xs font-normal outline-none focus:border-[#f96302]" value={filters.loadType} onChange={e => setFilters({...filters, loadType: e.target.value})}>
+                            <option value="">All</option>
+                            <option value="Live">Live Load</option>
+                            <option value="Drop">Drop Load</option>
+                          </select>
+                        </th>
+                        <th className="px-2 py-2">
                           <input type="text" placeholder="Filter Vendor..." className="w-full px-2 py-1.5 rounded border border-slate-300 text-xs font-normal outline-none focus:border-[#f96302]" value={filters.vendor} onChange={e => setFilters({...filters, vendor: e.target.value})} />
                         </th>
                         <th className="px-2 py-2">
@@ -1894,13 +1901,6 @@ export default function App() {
                         </th>
                         <th className="px-2 py-2">
                           <input type="text" placeholder="Filter Dest..." className="w-full px-2 py-1.5 rounded border border-slate-300 text-xs font-normal outline-none focus:border-[#f96302]" value={filters.destination} onChange={e => setFilters({...filters, destination: e.target.value})} />
-                        </th>
-                        <th className="px-2 py-2">
-                          <select className="w-full px-2 py-1.5 rounded border border-slate-300 text-xs font-normal outline-none focus:border-[#f96302]" value={filters.loadType} onChange={e => setFilters({...filters, loadType: e.target.value})}>
-                            <option value="">All</option>
-                            <option value="Live Load">Live Load</option>
-                            <option value="Drop Load">Drop Load</option>
-                          </select>
                         </th>
                         <th className="px-2 py-2">
                           <input type="date" className="w-full px-2 py-1.5 rounded border border-slate-300 text-xs font-normal outline-none focus:border-[#f96302]" value={filters.appointmentDate} onChange={e => setFilters({...filters, appointmentDate: e.target.value})} />
@@ -1915,11 +1915,12 @@ export default function App() {
                           <input type="text" placeholder="Filter Comments..." className="w-full px-2 py-1.5 rounded border border-slate-300 text-xs font-normal outline-none focus:border-[#f96302]" value={filters.comments} onChange={e => setFilters({...filters, comments: e.target.value})} />
                         </th>
                         <th className="px-2 py-2"></th>
+                        <th className="px-2 py-2"></th>
                         <th className="px-2 py-2">
                           <input type="text" placeholder="Filter Appt ID..." className="w-full px-2 py-1.5 rounded border border-slate-300 text-xs font-normal outline-none focus:border-[#f96302]" value={filters.appointmentId} onChange={e => setFilters({...filters, appointmentId: e.target.value})} />
                         </th>
                         <th className="px-2 py-2 text-center">
-                           <button onClick={() => setFilters({status: '', vendor: '', carrier: '', idValue: '', destination: '', loadType: '', appointmentDate: '', skidCount: '', timeSlot1: '', comments: '', confirmedTime: '', appointmentId: ''})} className="w-full px-2 py-1.5 bg-white border border-slate-300 hover:bg-slate-50 rounded text-slate-600 text-xs font-medium transition-colors flex justify-center items-center gap-1">
+                           <button onClick={() => setFilters({status: '', loadType: '', vendor: '', carrier: '', idValue: '', destination: '', appointmentDate: '', skidCount: '', timeSlot1: '', comments: '', confirmedTime: '', appointmentId: ''})} className="w-full px-2 py-1.5 bg-white border border-slate-300 hover:bg-slate-50 rounded text-slate-600 text-xs font-medium transition-colors flex justify-center items-center gap-1">
                              <X className="w-3.5 h-3.5"/> Clear
                            </button>
                         </th>
@@ -1928,7 +1929,7 @@ export default function App() {
                     <tbody className="divide-y divide-slate-100">
                       {allRequests.length === 0 ? (
                         <tr>
-                           <td colSpan="15" className="px-4 py-16 text-center">
+                           <td colSpan="16" className="px-4 py-16 text-center">
                               <div className="flex flex-col items-center justify-center text-slate-400">
                                  <UploadCloud className="w-16 h-16 mb-4 text-slate-300" />
                                  <p className="text-lg font-medium text-slate-500">No requests compiled yet.</p>
@@ -1938,7 +1939,7 @@ export default function App() {
                         </tr>
                       ) : processedRequests.length === 0 ? (
                         <tr>
-                           <td colSpan="15" className="px-4 py-16 text-center text-slate-500 font-medium">
+                           <td colSpan="16" className="px-4 py-16 text-center text-slate-500 font-medium">
                               No requests match your current filters.
                            </td>
                         </tr>
@@ -1963,6 +1964,11 @@ export default function App() {
                                 {req.status}
                               </span>
                             </td>
+                            <td className="px-4 py-3 font-medium text-xs whitespace-nowrap">
+                               {req.loadType === 'Live Load' ? <span title="Live Load"><Truck className="w-4 h-4 text-blue-500 inline mr-1"/> Live</span> :
+                                req.loadType === 'Drop Load' ? <span title="Drop Load"><ArrowDown className="w-4 h-4 text-purple-500 inline mr-1"/> Drop</span> :
+                                <span className="text-slate-400">--</span>}
+                            </td>
                             <td className="px-4 py-3 text-slate-600 text-xs truncate max-w-[120px]" title={req.vendor}>{req.vendor || '--'}</td>
                             <td className="px-4 py-3 text-slate-600 text-xs truncate max-w-[120px]" title={req.carrier}>{req.carrier || '--'}</td>
                             <td className="px-4 py-3 font-medium text-slate-800">
@@ -1973,15 +1979,6 @@ export default function App() {
                               </div>
                             </td>
                             <td className="px-4 py-3 text-slate-600">{req.destination?.split(' - ')[1] || req.destination}</td>
-                            <td className="px-4 py-3 text-slate-600 whitespace-nowrap">
-                              {req.loadType === 'Live Load' ? (
-                                <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-xs font-bold bg-blue-50 text-blue-700 border border-blue-200"><Truck className="w-3 h-3"/> Live</span>
-                              ) : req.loadType === 'Drop Load' ? (
-                                <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-xs font-bold bg-purple-50 text-purple-700 border border-purple-200"><ArrowDown className="w-3 h-3"/> Drop</span>
-                              ) : (
-                                req.loadType || '--'
-                              )}
-                            </td>
                             <td className="px-4 py-3 text-slate-800 font-medium whitespace-nowrap">{req.appointmentDate}</td>
                             
                             <td className="px-4 py-3">
@@ -1999,6 +1996,39 @@ export default function App() {
 
                             <td className="px-4 py-3 text-xs text-slate-600 max-w-[150px] truncate" title={req.comments}>
                                {req.comments || '--'}
+                            </td>
+
+                            <td className="px-4 py-3 min-w-[180px]">
+                              {(() => {
+                                const firstIdValue = (req.idValue || '').split(',')[0].trim();
+                                const idPrefix = req.idType === 'PO' ? 'PO ' : '';
+                                
+                                let suffix = '';
+                                if (req.destination && req.destination.includes('7340') && req.boltonTrailerType) {
+                                  if (req.boltonTrailerType === 'Vendor') suffix = '\n-VEN-';
+                                  else if (req.boltonTrailerType === 'Innovation Centre (IC)') suffix = '\n-IC-';
+                                  else if (req.boltonTrailerType === 'Miscellaneous') suffix = '\n-MISC-';
+                                }
+
+                                const tmCommentString = `${(req.vendor || '').toUpperCase()}\n${idPrefix}${firstIdValue}\n${req.skidCount} SKIDS${suffix}`;
+
+                                return (
+                                  <div className="relative group/copy w-max mx-auto">
+                                    <div className="bg-yellow-300 border border-yellow-400 px-4 py-2 rounded text-center shadow-sm w-full min-w-[140px]">
+                                      <pre className="font-mono text-[11px] font-bold text-black whitespace-pre-wrap leading-tight">
+                                        {tmCommentString}
+                                      </pre>
+                                    </div>
+                                    <button 
+                                      onClick={() => navigator.clipboard.writeText(tmCommentString)}
+                                      className="absolute -top-2 -right-2 bg-slate-800 text-white p-1.5 rounded-md opacity-0 group-hover/copy:opacity-100 transition-opacity shadow-md hover:bg-slate-700 flex items-center gap-1"
+                                      title="Copy to Clipboard"
+                                    >
+                                      <FileText className="w-3 h-3" />
+                                    </button>
+                                  </div>
+                                );
+                              })()}
                             </td>
 
                             <td className="px-4 py-3 min-w-[160px]">
@@ -2074,11 +2104,11 @@ export default function App() {
                                   </button>
                                 </div>
                               ) : (
-                                <div className="flex items-center justify-center gap-1">
+                                <div className="flex items-center justify-center gap-2">
                                   <span className="text-xs text-slate-400 italic">Processed</span>
                                   <button 
-                                    onClick={() => setAllRequests(prev => prev.map(r => r.id === req.id ? { ...r, status: 'Requested' } : r))}
-                                    className="p-1.5 text-slate-400 hover:text-[#f96302] hover:bg-orange-50 rounded transition-colors" 
+                                    onClick={() => setAllRequests(prev => prev.map(r => r.id === req.id ? { ...r, status: 'Requested', confirmedDate: '', confirmedTimeSlot: '', appointmentId: '' } : r))} 
+                                    className="p-1.5 text-slate-400 hover:text-blue-600 hover:bg-blue-50 rounded transition-colors" 
                                     title="Revert to Requested"
                                   >
                                     <RotateCcw className="w-4 h-4" />
@@ -2153,9 +2183,7 @@ export default function App() {
               <h3 className="font-bold text-lg">Send Bulk Confirmations</h3>
             </div>
             <div className="p-6 flex flex-col gap-4">
-               <p className="text-sm text-slate-600">You are about to generate confirmation drafts for <strong>{selectedPendingCount}</strong> request(s).</p>
-               
-               <p className="text-sm text-slate-600">Replies will be automatically grouped by their original email source, generating <strong>{new Set(selectedPendingReqs.map(r => r.sourceFile || r.carrierEmail)).size}</strong> distinct email thread(s).</p>
+               <p className="text-sm text-slate-600">You are about to generate combined confirmation drafts for <strong>{selectedPendingCount}</strong> request(s) consolidated into <strong>{new Set(selectedPendingReqs.map(r => r.sourceFile || r.id)).size}</strong> email thread(s).</p>
                
                <div className="bg-blue-50 text-blue-800 p-3 rounded-md border border-blue-200 text-sm">
                  <strong>Note:</strong> Generating multiple drafts will trigger multiple file downloads. Please allow your browser to "Download Multiple Files" if prompted at the top of your screen.
