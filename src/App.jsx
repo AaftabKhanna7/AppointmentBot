@@ -60,10 +60,12 @@ const checkCutoffTime = (region) => {
   const hour = localDate.getHours();
   const isWeekend = day === 0 || day === 6;
 
-  if (isWeekend || day === 1) {
-    return "Notice: Weekend/Monday handling is in effect. Standard appointments will default to the next valid business day.";
+  if ((day === 5 && hour >= 16) || isWeekend) {
+    return "Notice: Requests submitted after Friday 4 PM cannot book for Monday. Earliest standard appointment will be Tuesday.";
   } else if (day === 5 && hour >= 14) {
-    return "Notice: It is Friday after the 2 PM cut-off time. Standard appointments will default to Tuesday.";
+    return "Notice: It is Friday after the 2 PM cut-off time. Standard appointments will default to Monday.";
+  } else if (isWeekend || day === 1) {
+    return "Notice: Weekend/Monday handling is in effect. Standard appointments will default to the next valid business day.";
   } else if (hour >= 14) {
     return "Notice: You missed the 2 PM cut-off time. Standard appointments will default to the next valid business day.";
   }
@@ -71,29 +73,55 @@ const checkCutoffTime = (region) => {
 };
 
 // Helper to precisely calculate the Target Date based on Cutoff rules
-const calculateTargetDate = (region) => {
+const calculateTargetDate = (region, destination, loadType) => {
   const timeZone = region === 'East' ? 'America/New_York' : 'America/Denver';
   const localDateString = new Date().toLocaleString("en-US", { timeZone });
   const localDate = new Date(localDateString);
-  const hour = localDate.getHours();
+  const nowForCalc = new Date(localDateString);
+  const currentDay = nowForCalc.getDay();
+  const currentHour = nowForCalc.getHours();
 
-  let addDays = 0; 
-  if (hour >= 14) {
+  let addDays = 1; 
+  if (currentHour >= 14) {
     addDays += 1;
   }
   
   localDate.setDate(localDate.getDate() + addDays);
   
+  const destStr = destination || '';
+  const isVaughan = destStr.includes('7275');
+  const isAvroFlatbeds = destStr.includes('7411');
+  const isAvro = destStr.includes('7410');
+  const isBolton = destStr.includes('7340');
+  
+  const allowsWeekends = isVaughan || isAvroFlatbeds;
+  const allowsWeekendDrops = (isAvro || isBolton) && loadType === 'Drop Load';
+
+  const isAfterFriday4PM = (currentDay === 5 && currentHour >= 16) || currentDay === 6 || currentDay === 0;
+
   while (true) {
     let targetDay = localDate.getDay();
     let targetMonth = localDate.getMonth();
     let targetDateNum = localDate.getDate();
     
     const isWeekend = targetDay === 0 || targetDay === 6;
-    const isMonday = targetDay === 1;
     const isCanadaDay = targetMonth === 6 && targetDateNum === 1;
 
-    if (isWeekend || isMonday || isCanadaDay) {
+    let shouldSkip = isCanadaDay;
+
+    if (isWeekend && !allowsWeekends && !allowsWeekendDrops) {
+      shouldSkip = true;
+    }
+
+    if (isAfterFriday4PM && targetDay === 1) {
+      const diffTime = localDate.getTime() - nowForCalc.getTime();
+      const diffDays = Math.ceil(diffTime / (1000 * 60 * 60 * 24));
+      if (diffDays <= 4) {
+        shouldSkip = true;
+      }
+    }
+
+    if (shouldSkip) {
       localDate.setDate(localDate.getDate() + 1);
     } else {
       break;
@@ -108,7 +136,7 @@ const calculateTargetDate = (region) => {
 
 // Helper to safely format SAP TM dates (MM/DD/YYYY) into HTML5 Input dates (YYYY-MM-DD)
 const formatTmDate = (dateStr) => {
-  if (dateStr === undefined || dateStr === null || dateStr === '') return '';
+  if (!dateStr) return '';
   const str = String(dateStr).trim();
   
   if (!isNaN(str) && Number(str) > 20000) {
@@ -120,9 +148,7 @@ const formatTmDate = (dateStr) => {
   if (str.includes('/')) {
     const parts = str.split('/');
     if (parts.length === 3) {
-       let year = parts[2];
-       if (year.length === 2) year = '20' + year; // Catch YY formatting and convert to YYYY
-       return `${year}-${parts[0].padStart(2, '0')}-${parts[1].padStart(2, '0')}`;
+       return `${parts[2]}-${parts[0].padStart(2, '0')}-${parts[1].padStart(2, '0')}`;
     }
   }
   return str;
@@ -130,7 +156,7 @@ const formatTmDate = (dateStr) => {
 
 // Helper to parse Excel Serial Times into standard 12-hour AM/PM format
 const formatTmTime = (timeStr) => {
-  if (timeStr === undefined || timeStr === null || timeStr === '') return '';
+  if (!timeStr) return '';
   const str = String(timeStr).trim();
 
   if (!isNaN(str) && Number(str) >= 0 && Number(str) <= 1 && str !== '') {
@@ -182,7 +208,7 @@ const normalizeTimeForComparison = (timeStr) => {
 
 // Helper to format time strictly to 12-hour format WITH seconds (e.g., 8:00:00 AM) for 7411 Slots
 const formatTo12HrWithSeconds = (timeStr) => {
-  if (timeStr === undefined || timeStr === null || timeStr === '') return '';
+  if (!timeStr) return '';
   let str = String(timeStr).trim();
   
   if (!isNaN(str) && Number(str) >= 0 && Number(str) <= 1 && str !== '') {
@@ -213,18 +239,77 @@ const formatTo12HrWithSeconds = (timeStr) => {
   return str;
 };
 
-const checkDateError = (dateStr, region) => {
+// Helper to safely format 12-hour time into 24-hour time for confirmations
+const formatTo24Hour = (timeStr) => {
+  if (!timeStr) return '';
+  if (timeStr.toLowerCase().includes('24/7')) return timeStr;
+  
+  const match = timeStr.match(/^(\d{1,2}):(\d{2})(?::\d{2})?\s*(AM|PM|am|pm)?$/);
+  if (match) {
+    let h = parseInt(match[1], 10);
+    const m = match[2];
+    const ampm = match[3] ? match[3].toUpperCase() : null;
+    
+    if (ampm) {
+      if (ampm === 'PM' && h < 12) h += 12;
+      if (ampm === 'AM' && h === 12) h = 0;
+    }
+    
+    return `${String(h).padStart(2, '0')}:${m}`;
+  }
+  return timeStr;
+};
+
+const checkDateError = (dateStr, region, destination, loadType) => {
   if (!dateStr) return null;
-  const minAllowedDate = region ? calculateTargetDate(region) : '';
+  const minAllowedDate = region ? calculateTargetDate(region, destination, loadType) : '';
   const selectedDate = new Date(dateStr + 'T12:00:00');
   const dayOfWeek = selectedDate.getDay();
   const month = selectedDate.getMonth();
   const dateNum = selectedDate.getDate();
 
-  if (dayOfWeek === 0 || dayOfWeek === 6) return 'Appointments cannot be booked on weekends.';
-  if (dayOfWeek === 1) return 'Appointments cannot be booked on Mondays.';
+  const destStr = destination || '';
+  const isVaughan = destStr.includes('7275');
+  const isAvroFlatbeds = destStr.includes('7411');
+  const isAvro = destStr.includes('7410');
+  const isBolton = destStr.includes('7340');
+  const isMontreal = destStr.includes('7364');
+  const isWoodstock = destStr.includes('7403');
+  const isMoncton = destStr.includes('7406');
+
+  const isWeekend = dayOfWeek === 0 || dayOfWeek === 6;
+
+  if (isWeekend) {
+      if (isVaughan || isAvroFlatbeds) {
+          // Allow
+      } else if ((isAvro || isBolton) && loadType === 'Drop Load') {
+          // Allow
+      } else if (isMontreal || isWoodstock || isMoncton) {
+          return 'Appointments cannot be booked on weekends for this destination.';
+      } else {
+          return 'Appointments cannot be booked on weekends.';
+      }
+  }
+
+  const timeZone = region === 'East' ? 'America/New_York' : 'America/Denver';
+  const nowForCalc = new Date(new Date().toLocaleString("en-US", { timeZone }));
+  const currentDay = nowForCalc.getDay();
+  const currentHour = nowForCalc.getHours();
+  const isAfterFriday4PM = (currentDay === 5 && currentHour >= 16) || currentDay === 6 || currentDay === 0;
+
+  if (dayOfWeek === 1 && isAfterFriday4PM) {
+      const diffTime = selectedDate.getTime() - nowForCalc.getTime();
+      const diffDays = Math.ceil(diffTime / (1000 * 60 * 60 * 24));
+      if (diffDays <= 4) {
+          return 'Requests submitted after Friday 4 PM cannot be booked for the upcoming Monday.';
+      }
+  }
+
   if (month === 6 && dateNum === 1) return 'Appointments cannot be booked on Canada Day (July 1st).';
-  if (minAllowedDate && dateStr < minAllowedDate) return `Must meet cutoff. Earliest date is ${minAllowedDate}.`;
+  
+  if (minAllowedDate && dateStr < minAllowedDate) {
+      return `Must meet cutoff rules. Earliest date is ${minAllowedDate}.`;
+  }
 
   const available = getAvailableTimeSlots(dateStr, region);
   if (available.length === 0) {
@@ -250,6 +335,7 @@ const initialFormState = {
   destination: '',
   applianceDropOff: 'N/A',
   loadType: '',
+  floorLoaded: 'No',
   boltonTrailerType: '',
   liveLoadAcknowledged: false,
   ids: [{ identifiers: [{ type: 'Shipment ID', value: '' }], date: '', timeSlot: '', skidCount: '', comments: '' }],
@@ -277,6 +363,27 @@ const MultiSelectDropdown = ({ filterKey, label, options, activeDropdown, setAct
         String(opt).toLowerCase().includes(searchTerm.toLowerCase())
     );
 
+    const isAllFilteredSelected = filteredOptions.length > 0 && filteredOptions.every(opt => slotFilters[filterKey]?.includes(opt));
+
+    const handleSelectAllFiltered = (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        
+        setSlotFilters(prev => {
+            const currentSelected = new Set(prev[filterKey] || []);
+            
+            if (isAllFilteredSelected) {
+                // Deselect all filtered items
+                filteredOptions.forEach(opt => currentSelected.delete(opt));
+            } else {
+                // Select all filtered items
+                filteredOptions.forEach(opt => currentSelected.add(opt));
+            }
+            
+            return { ...prev, [filterKey]: Array.from(currentSelected) };
+        });
+    };
+
     return (
         <div className="relative inline-block text-left mr-3 mb-3">
             <button
@@ -290,7 +397,7 @@ const MultiSelectDropdown = ({ filterKey, label, options, activeDropdown, setAct
 
             {isOpen && (
                 <div className="absolute z-50 w-56 mt-2 origin-top-right bg-white rounded-md shadow-lg ring-1 ring-black ring-opacity-5 focus:outline-none">
-                    <div className="p-2 border-b border-slate-100">
+                    <div className="p-2 border-b border-slate-100 flex flex-col gap-2">
                         <input
                             type="text"
                             className="w-full px-2 py-1.5 text-xs border border-slate-300 rounded focus:outline-none focus:border-[#f96302] focus:ring-1 focus:ring-[#f96302]"
@@ -300,6 +407,20 @@ const MultiSelectDropdown = ({ filterKey, label, options, activeDropdown, setAct
                             onClick={(e) => e.stopPropagation()} 
                             autoFocus
                         />
+                        {filteredOptions.length > 0 && (
+                            <button
+                                onClick={handleSelectAllFiltered}
+                                className="w-full text-left px-2 py-1.5 text-xs font-bold text-slate-600 bg-slate-50 border border-slate-200 rounded hover:bg-slate-100 transition-colors flex items-center justify-between"
+                            >
+                                <span>{isAllFilteredSelected ? 'Deselect All' : 'Select All'} {searchTerm && 'Matching'}</span>
+                                <input 
+                                    type="checkbox" 
+                                    className="w-3.5 h-3.5 accent-[#f96302] pointer-events-none" 
+                                    checked={isAllFilteredSelected} 
+                                    readOnly 
+                                />
+                            </button>
+                        )}
                     </div>
                     <div className="p-2 max-h-60 overflow-y-auto">
                         {filteredOptions.length === 0 ? (
@@ -370,6 +491,7 @@ export default function App() {
   });
 
   const [sortConfig, setSortConfig] = useState({ key: 'timestamp', direction: 'asc' });
+  const [slotSortConfig, setSlotSortConfig] = useState({ key: null, direction: 'asc' });
   const [selectedIds, setSelectedIds] = useState(new Set());
 
   const [slotFilters, setSlotFilters] = useState({
@@ -398,7 +520,7 @@ export default function App() {
 
   useEffect(() => {
     if (formData.region) {
-      const tDate = calculateTargetDate(formData.region);
+      const tDate = calculateTargetDate(formData.region, formData.destination, formData.loadType);
       const warning = checkCutoffTime(formData.region);
       setFormData(prev => ({ 
         ...prev, 
@@ -549,7 +671,7 @@ export default function App() {
   };
 
   const addIdField = () => {
-    const defaultDate = formData.region ? calculateTargetDate(formData.region) : '';
+    const defaultDate = formData.region ? calculateTargetDate(formData.region, formData.destination, formData.loadType) : '';
     setFormData(prev => ({ 
       ...prev, 
       ids: [...prev.ids, { identifiers: [{ type: 'Shipment ID', value: '' }], date: defaultDate, timeSlot: '', skidCount: '', comments: '' }]
@@ -605,8 +727,11 @@ export default function App() {
     }
 
     if (!formData.loadType) errors.loadType = "Please select a load type.";
-    if (formData.loadType === 'Live Load' && !formData.liveLoadAcknowledged && formData.applianceDropOff !== 'Yes') {
-      errors.liveLoadAcknowledged = "You must acknowledge the skid limit for Live Loads.";
+    
+    const hasSkidLimit = formData.destination.includes('7275') || formData.destination.includes('7410');
+    
+    if (formData.loadType === 'Live Load' && hasSkidLimit && !formData.liveLoadAcknowledged && formData.applianceDropOff !== 'Yes' && formData.floorLoaded !== 'Yes') {
+      errors.liveLoadAcknowledged = "You must acknowledge the skid limit for Live Loads at this facility.";
     }
 
     if (formData.region === 'East' && formData.destination.includes('7340')) {
@@ -616,7 +741,7 @@ export default function App() {
     }
 
     const is247DropFacility = formData.region === 'East' && 
-                              (formData.destination.includes('7275') || formData.destination.includes('7340')) && 
+                              (formData.destination.includes('7275') || formData.destination.includes('7340') || formData.destination.includes('7410')) && 
                               formData.loadType === 'Drop Load';
 
     let totalSkids = 0;
@@ -635,7 +760,7 @@ export default function App() {
       if (!idObj.date) {
         errors[`id_${index}_date`] = `Date is required for Shipment #${index + 1}.`;
       } else {
-        const dateErr = checkDateError(idObj.date, formData.region);
+        const dateErr = checkDateError(idObj.date, formData.region, formData.destination, formData.loadType);
         if (dateErr) {
           errors[`id_${index}_date`] = dateErr;
         }
@@ -652,20 +777,24 @@ export default function App() {
           }
       }
       
-      const skidNum = parseInt(idObj.skidCount, 10);
-      if (isNaN(skidNum) || skidNum <= 0 || skidNum >= 999) {
-        errors[`id_${index}_skidCount`] = `Valid SKID count required for Shipment #${index + 1}.`;
-      } else {
-        totalSkids += skidNum;
-        if (formData.loadType === 'Live Load' && skidNum > 15 && formData.applianceDropOff !== 'Yes') {
-          errors[`id_${index}_skidCount`] = `Live loads cannot exceed 15 skids per shipment.`;
+      if (formData.floorLoaded !== 'Yes') {
+        const skidNum = parseInt(idObj.skidCount, 10);
+        if (isNaN(skidNum) || skidNum <= 0 || skidNum >= 999) {
+          errors[`id_${index}_skidCount`] = `Valid SKID count required for Shipment #${index + 1}.`;
+        } else {
+          totalSkids += skidNum;
+          if (formData.loadType === 'Live Load' && hasSkidLimit && skidNum > 15 && formData.applianceDropOff !== 'Yes') {
+            errors[`id_${index}_skidCount`] = `Live loads cannot exceed 15 skids per shipment at this facility.`;
+          }
         }
       }
     });
 
-    const maxAllowedSkids = 15 * formData.ids.length;
-    if (formData.loadType === 'Live Load' && totalSkids > maxAllowedSkids && formData.applianceDropOff !== 'Yes') {
-      errors.loadType = `If you selected more than 15 skids per shipment (total > ${maxAllowedSkids}), it will automatically be converted into a drop load. Please change to Drop Load.`;
+    if (formData.floorLoaded !== 'Yes') {
+      const maxAllowedSkids = 15 * formData.ids.length;
+      if (formData.loadType === 'Live Load' && hasSkidLimit && totalSkids > maxAllowedSkids && formData.applianceDropOff !== 'Yes') {
+        errors.loadType = `If you selected more than 15 skids per shipment (total > ${maxAllowedSkids}), it will automatically be converted into a drop load. Please change to Drop Load.`;
+      }
     }
 
     if (!formData.hasBol) errors.hasBol = "Please specify if you have a BOL.";
@@ -716,7 +845,7 @@ export default function App() {
 
   const getCSVContent = (exportData) => {
     const is247DropFacility = exportData.region === 'East' && 
-                              (exportData.destination.includes('7275') || exportData.destination.includes('7340')) && 
+                              (exportData.destination.includes('7275') || exportData.destination.includes('7340') || exportData.destination.includes('7410')) && 
                               exportData.loadType === 'Drop Load';
 
     const bolNames = exportData.bolFiles.map(f => f.name).join('; ');
@@ -728,6 +857,7 @@ export default function App() {
       ["Destination", exportData.destination || ''],
       ["Appliance Drop Off", exportData.applianceDropOff || ''],
       ["Load Type", exportData.loadType || ''],
+      ["Floor Loaded", exportData.floorLoaded || 'No'],
       ["Bolton Load Category", exportData.boltonTrailerType || 'N/A'],
       ["Live Load Acknowledged", exportData.liveLoadAcknowledged ? 'Yes' : 'N/A'],
       ["Has BOL", exportData.hasBol || ''],
@@ -750,7 +880,7 @@ export default function App() {
       rows.push([`ID ${n} - Identifiers Detailed`, identStrings]);
       rows.push([`ID ${n} - Date`, idObj.date || '']);
       rows.push([`ID ${n} - Time Slot`, is247DropFacility ? '24/7 Drop' : (idObj.timeSlot || '')]);
-      rows.push([`ID ${n} - Skid Count`, idObj.skidCount || '']);
+      rows.push([`ID ${n} - Skid Count`, exportData.floorLoaded === 'Yes' ? 'Floor Loaded' : (idObj.skidCount || '')]);
       rows.push([`ID ${n} - Comments`, idObj.comments || '']);
     });
 
@@ -759,27 +889,29 @@ export default function App() {
 
   const handleEmailBooking = () => {
     const is247DropFacility = formData.region === 'East' && 
-                              (formData.destination.includes('7275') || formData.destination.includes('7340')) && 
+                              (formData.destination.includes('7275') || formData.destination.includes('7340') || formData.destination.includes('7410')) && 
                               formData.loadType === 'Drop Load';
 
     const firstId = formData.ids[0]?.identifiers[0]?.value || '';
     const titleSuffix = formData.ids.length > 1 || formData.ids[0]?.identifiers.length > 1 ? ' & others' : '';
     const subject = `Load Booking Request - ${firstId}${titleSuffix} - ${formData.destination}`;
     
-    const bolNames = formData.bolFiles.map(f => f.name).join('; ');
-    const validCCs = (formData.carrierCCs || []).filter(c => c.trim()).join(', ');
-
+    // --- PLAIN TEXT BODY (For Parsers & Fallback) ---
     let bodyText = `Please find the load booking details below:\r\n\r\n`;
     bodyText += `Region: ${formData.region || ''}\r\n`;
     bodyText += `Destination: ${formData.destination || ''}\r\n`;
     if (formData.applianceDropOff && formData.applianceDropOff !== 'N/A') bodyText += `Appliance Drop Off: ${formData.applianceDropOff}\r\n`;
     bodyText += `Load Type: ${formData.loadType || ''}\r\n`;
+    bodyText += `Floor Loaded: ${formData.floorLoaded || 'No'}\r\n`;
     if (formData.region === 'East' && formData.destination.includes('7340')) {
         bodyText += `Bolton Category: ${formData.boltonTrailerType || ''}\r\n`;
     }
     
+    const bolNames = formData.bolFiles.map(f => f.name).join(', ');
     bodyText += `Has BOL: ${formData.hasBol || ''} ${formData.bolFiles.length > 0 ? `(${bolNames})` : ''}\r\n`;
     
+    const validCCs = (formData.carrierCCs || []).filter(c => c.trim()).join(', ');
+
     bodyText += `Vendor/Shipper: ${formData.vendor || ''}\r\n`;
     bodyText += `Carrier: ${formData.carrier || ''}\r\n`;
     bodyText += `Carrier Email: ${formData.carrierEmail || ''}\r\n`;
@@ -790,102 +922,98 @@ export default function App() {
     formData.ids.forEach((idObj, index) => {
       const identStrings = idObj.identifiers.map(i => `${i.type}: ${i.value}`).join(', ');
       bodyText += `\r\n[#${index + 1}] Identifiers: ${identStrings}\r\n`;
-      bodyText += `Date: ${idObj.date} | Preferred Time: ${is247DropFacility ? '24/7 Drop' : idObj.timeSlot} | SKIDs: ${idObj.skidCount}\r\n`;
+      bodyText += `Date: ${idObj.date} | Preferred Time: ${is247DropFacility ? '24/7 Drop' : idObj.timeSlot} | SKIDs: ${formData.floorLoaded === 'Yes' ? 'Floor Loaded' : idObj.skidCount}\r\n`;
       if (idObj.comments) bodyText += `Comments: ${idObj.comments}\r\n`;
     });
     bodyText += `\r\n-----------------------\r\n`;
 
-    // --- Visible HTML Body (Comprehensive Blue Grid) ---
+    // --- HTML TABLE BODY (For Humans in Outlook) ---
     let htmlBody = `
-    <div style="font-family: Arial, sans-serif; color: #000; font-size: 13px;">
-      <p>Hello,</p>
-      <p>Please find our comprehensive load booking request details below:</p>
-      
-      <table style="width: 100%; max-width: 700px; border-collapse: collapse; border: 1px solid #7ba0cd;">
-        <thead>
-          <tr>
-            <th style="padding: 6px 10px; border: 1px solid #7ba0cd; text-align: left; background-color: #cce0f5; width: 35%;">Field</th>
-            <th style="padding: 6px 10px; border: 1px solid #7ba0cd; text-align: left; background-color: #e6f0fa; font-weight: bold; width: 65%;">Value</th>
-          </tr>
-        </thead>
-        <tbody>
+      <div style="font-family: Arial, sans-serif; font-size: 13px; color: #333;">
+        <p>Please find the load booking details below:</p>
+        <table style="border-collapse: collapse; width: 100%; max-width: 600px; border: 1px solid #b8d4f0; font-size: 13px;">
+          <thead>
+            <tr style="background-color: #cce0f5; text-align: left;">
+              <th style="padding: 8px 12px; border: 1px solid #b8d4f0; width: 35%;">Field</th>
+              <th style="padding: 8px 12px; border: 1px solid #b8d4f0; width: 65%;">Value</th>
+            </tr>
+          </thead>
+          <tbody>
     `;
 
-    const addRow = (label, val) => {
-        htmlBody += `
-          <tr>
-            <td style="padding: 6px 10px; border: 1px solid #7ba0cd; background-color: #cce0f5; font-weight: bold;">${label}</td>
-            <td style="padding: 6px 10px; border: 1px solid #7ba0cd; background-color: #ffffff;">${val || ''}</td>
-          </tr>
-        `;
+    const addRow = (label, value) => {
+      htmlBody += `
+        <tr style="background-color: #ffffff;">
+          <td style="padding: 8px 12px; border: 1px solid #b8d4f0; background-color: #e6f0fa; font-weight: bold;">${label}</td>
+          <td style="padding: 8px 12px; border: 1px solid #b8d4f0; word-break: break-word;">${value || 'N/A'}</td>
+        </tr>
+      `;
     };
 
-    addRow("Appointment Needed", formData.needsAppointment || 'Yes');
     addRow("Region", formData.region);
     addRow("Destination", formData.destination);
-    addRow("Appliance Drop Off", formData.applianceDropOff);
+    if (formData.applianceDropOff && formData.applianceDropOff !== 'N/A') addRow("Appliance Drop Off", formData.applianceDropOff);
     addRow("Load Type", formData.loadType);
-    addRow("Bolton Load Category", formData.boltonTrailerType || 'N/A');
-    addRow("Live Load Acknowledged", formData.liveLoadAcknowledged ? 'Yes' : 'N/A');
-    addRow("Has BOL", formData.hasBol);
-    addRow("BOL File", bolNames || 'N/A');
+    addRow("Floor Loaded", formData.floorLoaded);
+    if (formData.region === 'East' && formData.destination.includes('7340')) addRow("Bolton Load Category", formData.boltonTrailerType);
+    addRow("Has BOL", `${formData.hasBol} ${formData.bolFiles.length > 0 ? `(${bolNames})` : ''}`);
     addRow("Vendor/Shipper", formData.vendor);
     addRow("Carrier", formData.carrier);
     addRow("Carrier Email", formData.carrierEmail);
-    addRow("Carrier CC", validCCs || 'N/A');
+    if (validCCs) addRow("Carrier CC", validCCs);
     addRow("Trailer Number", formData.trailer);
-    addRow("System Notice (Cutoff)", formData.systemTimeWarning !== 'None' ? formData.systemTimeWarning : 'None');
 
-    formData.ids.forEach((idObj, index) => {
-      const n = index + 1;
-      const combinedValues = idObj.identifiers.map(i => i.value).join(', ');
-      const identStrings = idObj.identifiers.map(i => `${i.type}: ${i.value}`).join(' | ');
-      
-      htmlBody += `<tr><td colspan="2" style="background-color: #7ba0cd; color: #ffffff; font-weight: bold; padding: 6px 10px; text-align: center; text-transform: uppercase;">Shipment / PO #${n}</td></tr>`;
-      
-      addRow(`ID ${n} - Type`, idObj.identifiers[0]?.type || '');
-      addRow(`ID ${n} - Value`, combinedValues);
-      addRow(`ID ${n} - Identifiers Detailed`, identStrings);
-      addRow(`ID ${n} - Date`, idObj.date);
-      addRow(`ID ${n} - Time Slot`, is247DropFacility ? '24/7 Drop Allowed' : (idObj.timeSlot || ''));
-      addRow(`ID ${n} - Skid Count`, idObj.skidCount);
-      addRow(`ID ${n} - Comments`, idObj.comments || '');
+    formData.ids.forEach((idObj, i) => {
+       htmlBody += `
+        <tr>
+          <td colspan="2" style="padding: 8px 12px; border: 1px solid #b8d4f0; background-color: #cce0f5; font-weight: bold; text-align: center;">--- Shipment / PO #${i + 1} ---</td>
+        </tr>
+       `;
+       const identStrings = idObj.identifiers.map(id => `${id.type}: ${id.value}`).join(' | ');
+       addRow("Identifiers Detailed", identStrings);
+       addRow("Date", idObj.date);
+       addRow("Time Slot", is247DropFacility ? '24/7 Drop' : idObj.timeSlot);
+       addRow("Skid Count", formData.floorLoaded === 'Yes' ? 'Floor Loaded' : idObj.skidCount);
+       addRow("Comments", idObj.comments);
     });
 
     htmlBody += `
-        </tbody>
-      </table>
-    </div>`;
+          </tbody>
+        </table>
+      </div>
+    `;
 
     const csvData = getCSVContent(formData);
     const base64CSV = btoa(unescape(encodeURIComponent("\uFEFF" + csvData))); 
-    const boundary = "----=_NextPart_MIXED_" + Date.now().toString(16);
-    const altBoundary = "----=_NextPart_ALT_" + Date.now().toString(16);
+    const boundaryAlternative = "----=_NextPart_Alt_" + Date.now().toString(16);
+    const boundaryMixed = "----=_NextPart_Mix_" + Date.now().toString(16);
 
     const toEmail = formData.region === 'East' ? 'TorontoAppts@homedepot.com' : 'CalgaryAppts@homedepot.com';
 
     const emlContent = [
+      `Date: ${new Date().toUTCString()}`,
       `To: ${toEmail}`,
       ...(validCCs ? [`Cc: ${validCCs}`] : []),
       `Subject: ${subject}`,
       `X-Unsent: 1`,
-      `Content-Type: multipart/mixed; boundary="${boundary}"`,
+      `Content-Type: multipart/mixed; boundary="${boundaryMixed}"`,
       ``,
-      `--${boundary}`,
-      `Content-Type: multipart/alternative; boundary="${altBoundary}"`,
+      `--${boundaryMixed}`,
+      `Content-Type: multipart/alternative; boundary="${boundaryAlternative}"`,
       ``,
-      `--${altBoundary}`,
+      `--${boundaryAlternative}`,
       `Content-Type: text/plain; charset="UTF-8"`,
       ``,
       bodyText,
       ``,
-      `--${altBoundary}`,
+      `--${boundaryAlternative}`,
       `Content-Type: text/html; charset="UTF-8"`,
       ``,
       htmlBody,
       ``,
-      `--${altBoundary}--`,
-      `--${boundary}`,
+      `--${boundaryAlternative}--`,
+      ``,
+      `--${boundaryMixed}`,
       `Content-Type: text/csv; name="booking_request_${firstId || 'export'}.csv"`,
       `Content-Disposition: attachment; filename="booking_request_${firstId || 'export'}.csv"`,
       `Content-Transfer-Encoding: base64`,
@@ -895,7 +1023,7 @@ export default function App() {
 
     formData.bolFiles.forEach(fileObj => {
       emlContent.push(
-        `--${boundary}`,
+        `--${boundaryMixed}`,
         `Content-Type: application/pdf; name="${fileObj.name}"`,
         `Content-Disposition: attachment; filename="${fileObj.name}"`,
         `Content-Transfer-Encoding: base64`,
@@ -904,7 +1032,7 @@ export default function App() {
       );
     });
 
-    emlContent.push(`--${boundary}--`);
+    emlContent.push(`--${boundaryMixed}--`);
 
     const blob = new Blob([emlContent.join('\r\n')], { type: 'message/rfc822' });
     const url = URL.createObjectURL(blob);
@@ -990,6 +1118,7 @@ export default function App() {
         destination: extractedData["Destination"],
         applianceDropOff: extractedData["Appliance Drop Off"],
         loadType: extractedData["Load Type"],
+        floorLoaded: extractedData["Floor Loaded"] || 'No',
         boltonTrailerType: extractedData["Bolton Load Category"] || '',
         hasBol: extractedData["Has BOL"],
         bolFile: extractedData["BOL File"],
@@ -1010,7 +1139,10 @@ export default function App() {
         exceptionFlag: false
       };
       
-      if (req.loadType === 'Live Load' && parseInt(req.skidCount, 10) > 15 && req.applianceDropOff !== 'Yes') {
+      const destStr = req.destination || '';
+      const hasSkidLimit = destStr.includes('7275') || destStr.includes('7410');
+      
+      if (req.loadType === 'Live Load' && hasSkidLimit && parseInt(req.skidCount, 10) > 15 && req.applianceDropOff !== 'Yes' && !String(req.skidCount).toLowerCase().includes('floor')) {
         req.exceptionFlag = true;
       }
 
@@ -1034,6 +1166,7 @@ export default function App() {
         timeSlot1: formatTmTime(extractedData["1st Choice Time Slot"] || extractedData["Time Slot"]),
         applianceDropOff: extractedData["Appliance Drop Off"],
         loadType: extractedData["Load Type"],
+        floorLoaded: extractedData["Floor Loaded"] || 'No',
         boltonTrailerType: extractedData["Bolton Load Category"] || '',
         idType: extractedData["ID Type"],
         idValue: extractedData["ID Value"],
@@ -1051,7 +1184,10 @@ export default function App() {
         exceptionFlag: false
       };
 
-      if (req.loadType === 'Live Load' && parseInt(req.skidCount, 10) > 15 && req.applianceDropOff !== 'Yes') {
+      const destStr = req.destination || '';
+      const hasSkidLimit = destStr.includes('7275') || destStr.includes('7410');
+      
+      if (req.loadType === 'Live Load' && hasSkidLimit && parseInt(req.skidCount, 10) > 15 && req.applianceDropOff !== 'Yes' && !String(req.skidCount).toLowerCase().includes('floor')) {
         req.exceptionFlag = true;
       }
       requests.push(req);
@@ -1107,68 +1243,66 @@ export default function App() {
           const workbook = window.XLSX.read(data, { type: 'array' });
           const firstSheetName = workbook.SheetNames[0];
           const worksheet = workbook.Sheets[firstSheetName];
-          
-          // CRITICAL: use raw: true to reliably get Excel serial numbers instead of locale-dependent strings
+          // Use raw:true to ensure Excel dates stay as serial numbers for strict parsing
           const json = window.XLSX.utils.sheet_to_json(worksheet, { defval: "", raw: true }); 
 
-          // Robust dynamic column matcher to handle unpredictable Excel Headers
-          const getVal = (row, matchers) => {
-              for (const m of matchers) {
-                  if (row[m] !== undefined && row[m] !== "") return row[m];
-              }
-              const rowKeys = Object.keys(row);
-              for (const m of matchers) {
-                  const found = rowKeys.find(k => k.toLowerCase().includes(m.toLowerCase()));
-                  if (found && row[found] !== undefined && row[found] !== "") return row[found];
-              }
-              return null;
-          };
-
           const parsedSlotsRaw = json.map((row, index) => {
-             const dateVal = getVal(row, ['Date', 'Start Date']);
-             const timeVal = getVal(row, ['Time', 'Start Time']);
-             const facVal = getVal(row, ['Facility ID', 'Location', 'Facility']);
-             const venVal = getVal(row, ['Vendor Name', 'Vendor', 'Shipper']);
-             const foVal = getVal(row, ['Freight Order', 'Document', 'FO']);
-             const poVal = getVal(row, ['Purchasing Doc', 'PO']);
-             const statusVal = getVal(row, ['Status', 'State']);
-
-             const newRow = { 
-                 ...row, 
-                 id: index,
-                 'Date': formatTmDate(dateVal),
-                 'Time': formatTo12HrWithSeconds(timeVal),
-                 'Facility ID': facVal || '',
-                 'Vendor Name': venVal || '',
-                 'Freight Order': foVal || '',
-                 'Purchasing Doc.': poVal || '',
-                 'Status': statusVal || ''
-             };
+             // Standardize dynamic headers immediately
+             const newRow = { id: index };
              
+             // Dynamic Date Mapping
+             let rawDate = row['Date'] !== undefined ? row['Date'] : row['Start Date'];
+             newRow['Date'] = formatTmDate(rawDate);
+             
+             // Dynamic Time Mapping
+             let rawTime = row['Time'] !== undefined ? row['Time'] : row['Start Time'];
+             newRow['Time'] = formatTo12HrWithSeconds(rawTime);
+             
+             // Dynamic Facility ID Mapping
+             newRow['Facility ID'] = row['Facility ID'] !== undefined ? row['Facility ID'] : row['Location'];
+             if (!newRow['Facility ID']) newRow['Facility ID'] = '7411'; // Default Fallback
+             
+             // Map standard fields
+             newRow['Appointment ID'] = row['Appointment ID'] || '';
+             newRow['Type'] = row['Type'] || '';
+             newRow['Vendor Name'] = row['Vendor Name'] || '';
+             newRow['Freight Order'] = row['Freight Order'] || row['Document'] || '';
+             newRow['Purchasing Doc.'] = row['Purchasing Doc.'] || row['PO'] || '';
+             newRow['SCAC Code'] = row['SCAC Code'] || row['Carrier'] || '';
+             newRow['Number of Skids'] = row['Number of Skids'] || row['Quantity'] || '';
+
              const comments = (row['Comments'] || '').toString().trim();
              const commentsLower = comments.toLowerCase();
              
              if (commentsLower.includes('hold')) {
                  newRow['Status'] = 'Hold';
-             } else if (commentsLower.includes('booked') || String(statusVal).toLowerCase().includes('scheduled')) {
+             } else if (commentsLower.includes('booked')) {
                  newRow['Status'] = 'Booked';
-             } else if (!comments && !statusVal) {
+             } else if (!comments) {
                  newRow['Status'] = 'Not Booked';
-             } else if (!newRow['Status']) {
+             } else {
                  newRow['Status'] = 'Not Booked';
              }
-
-             // Cleanup redundant columns to prevent table clutter
-             if (newRow['Start Date']) delete newRow['Start Date'];
-             if (newRow['Start Time']) delete newRow['Start Time'];
-             if (newRow['Location']) delete newRow['Location'];
 
              return newRow;
           });
 
-          // Set all slots directly (Removed the aggressive past-date purge that caused files to appear empty)
-          setSlotMatrix(parsedSlotsRaw);
-          alert(`Success! Loaded ${parsedSlotsRaw.length} slots.`);
+          // Sort ascending by Date then Time by default
+          const sortedSlots = parsedSlotsRaw.sort((a, b) => {
+              const dateA = a['Date'] || '';
+              const dateB = b['Date'] || '';
+              if (dateA < dateB) return -1;
+              if (dateA > dateB) return 1;
+              
+              const timeA = normalizeTimeForComparison(a['Time']) || '';
+              const timeB = normalizeTimeForComparison(b['Time']) || '';
+              if (timeA < timeB) return -1;
+              if (timeA > timeB) return 1;
+              return 0;
+          });
+
+          setSlotMatrix(sortedSlots);
+          alert(`Success! Loaded ${sortedSlots.length} slots.`);
         } catch (err) {
           console.error(err);
           alert("Error parsing the Capacity Matrix file. Please ensure it is a valid CSV or XLSX format.");
@@ -1202,26 +1336,12 @@ export default function App() {
           const workbook = window.XLSX.read(data, { type: 'array' });
           const firstSheetName = workbook.SheetNames[0];
           const worksheet = workbook.Sheets[firstSheetName];
-          // Enforce raw: true for stable date comparisons
           const json = window.XLSX.utils.sheet_to_json(worksheet, { defval: "", raw: true }); 
 
           if (json.length === 0) {
             alert("Error: The uploaded TM Export file is empty.");
             return;
           }
-
-          // Utilize robust column matching for the TM sync as well
-          const getVal = (row, matchers) => {
-              for (const m of matchers) {
-                  if (row[m] !== undefined && row[m] !== "") return row[m];
-              }
-              const rowKeys = Object.keys(row);
-              for (const m of matchers) {
-                  const found = rowKeys.find(k => k.toLowerCase().includes(m.toLowerCase()));
-                  if (found && row[found] !== undefined && row[found] !== "") return row[found];
-              }
-              return null;
-          };
 
           setSlotMatrix(prevMatrix => {
               const localTmRows = json.map(r => ({...r, _used: false}));
@@ -1230,11 +1350,11 @@ export default function App() {
                   const matchIndex = localTmRows.findIndex(row => {
                       if (row._used) return false;
                       
-                      const tmDateNorm = formatTmDate(getVal(row, ['Date', 'Start Date']));
-                      const tmTimeNorm = normalizeTimeForComparison(getVal(row, ['Time', 'Start Time']));
-                      const tmFacility = String(getVal(row, ['Facility ID', 'Location']) || '').trim();
+                      const tmDateNorm = formatTmDate(row['Date'] || row['Start Date']);
+                      const tmTimeNorm = normalizeTimeForComparison(row['Time'] || row['Start Time']);
+                      const tmFacility = String(row['Facility ID'] || row['Location'] || '').trim();
 
-                      const slotDateNorm = formatTmDate(slot['Date']);
+                      const slotDateNorm = slot['Date'];
                       const slotTimeNorm = normalizeTimeForComparison(slot['Time']);
                       const slotFacility = String(slot['Facility ID'] || '').trim();
 
@@ -1250,20 +1370,19 @@ export default function App() {
                       const tmRow = localTmRows[matchIndex];
                       
                       let newStatus = slot['Status'];
-                      const tmStatus = String(getVal(tmRow, ['Status', 'State']) || '');
-                      if (tmStatus.toLowerCase().includes('scheduled') || tmStatus.toLowerCase().includes('booked')) {
+                      if (String(tmRow['Status']).trim().toLowerCase() === 'scheduled') {
                           newStatus = 'Booked';
                       }
                       
                       return {
                           ...slot,
-                          'Appointment ID': getVal(tmRow, ['Appointment ID', 'Appt']) || slot['Appointment ID'],
-                          'Type': getVal(tmRow, ['Type', 'Load Type']) || slot['Type'],
-                          'SCAC Code': getVal(tmRow, ['SCAC Code', 'Carrier']) || slot['SCAC Code'],
-                          'Number of Skids': getVal(tmRow, ['Number of Skids', 'Skids']) || slot['Number of Skids'],
-                          'Purchasing Doc.': getVal(tmRow, ['Purchasing Doc', 'PO']) || slot['Purchasing Doc.'],
-                          'Freight Order': getVal(tmRow, ['Freight Order', 'FO', 'Document']) || slot['Freight Order'],
-                          'Vendor Name': getVal(tmRow, ['Vendor Name', 'Vendor', 'Shipper']) || slot['Vendor Name'],
+                          'Appointment ID': tmRow['Appointment ID'] || slot['Appointment ID'],
+                          'Type': tmRow['Type'] || slot['Type'],
+                          'SCAC Code': tmRow['SCAC Code'] || tmRow['Carrier'] || slot['SCAC Code'],
+                          'Number of Skids': tmRow['Number of Skids'] !== undefined && tmRow['Number of Skids'] !== "" ? String(tmRow['Number of Skids']) : slot['Number of Skids'],
+                          'Purchasing Doc.': tmRow['Purchasing Doc.'] || row['PO'] || slot['Purchasing Doc.'],
+                          'Freight Order': tmRow['Freight Order'] || row['Document'] || slot['Freight Order'],
+                          'Vendor Name': tmRow['Vendor Name'] || slot['Vendor Name'],
                           'Status': newStatus
                       };
                   }
@@ -1444,9 +1563,23 @@ export default function App() {
     setSortConfig({ key, direction });
   };
 
+  const slotRequestSort = (key) => {
+    let direction = 'asc';
+    if (slotSortConfig.key === key && slotSortConfig.direction === 'asc') {
+      direction = 'desc';
+    }
+    setSlotSortConfig({ key, direction });
+  };
+
   const getSortIcon = (key) => {
     if (sortConfig.key !== key) return <ArrowUpDown className="w-3 h-3 text-slate-400" />;
     if (sortConfig.direction === 'asc') return <ArrowUp className="w-3 h-3 text-[#f96302]" />;
+    return <ArrowDown className="w-3 h-3 text-[#f96302]" />;
+  };
+
+  const getSlotSortIcon = (key) => {
+    if (slotSortConfig.key !== key) return <ArrowUpDown className="w-3 h-3 text-slate-400" />;
+    if (slotSortConfig.direction === 'asc') return <ArrowUp className="w-3 h-3 text-[#f96302]" />;
     return <ArrowDown className="w-3 h-3 text-[#f96302]" />;
   };
 
@@ -1523,6 +1656,24 @@ export default function App() {
     setTimeout(() => setShowEasterEgg(false), 2000);
   };
 
+  const getSapTmComment = (req) => {
+    if (req.customSapTmComment !== undefined) return req.customSapTmComment;
+    
+    const vendor = (req.vendor || '').toUpperCase();
+    const firstIdValue = (req.idValue || '').split(',')[0].trim();
+    const idPrefix = req.idType === 'PO' ? 'PO ' : (req.idType === 'Shipment ID' ? '' : `${req.idType || 'PO '} `);
+    
+    let suffix = '';
+    if (req.destination && req.destination.includes('7340') && req.boltonTrailerType) {
+      if (req.boltonTrailerType.includes('Vendor')) suffix = '\n-VEN-';
+      else if (req.boltonTrailerType.includes('Innovation Centre') || req.boltonTrailerType.includes('IC')) suffix = '\n-IC-';
+      else if (req.boltonTrailerType.includes('Miscellaneous') || req.boltonTrailerType.includes('Misc')) suffix = '\n-MISC-';
+    }
+
+    const skidsStr = req.floorLoaded === 'Yes' ? 'FLOOR LOADED' : `${req.skidCount || 0} SKIDS`;
+    return `${vendor}\n${idPrefix}${firstIdValue}\n${skidsStr}${suffix}`.trim();
+  };
+
   const openReplyModal = (req) => {
     if (!req.carrierEmail) {
       alert("No email address was provided by the carrier for this request.");
@@ -1543,68 +1694,104 @@ export default function App() {
 
     const finalConfDate = req.confirmedDate || req.appointmentDate;
     const finalConfTime = req.confirmedTimeSlot || req.timeSlot1;
+    const finalConfTime24 = formatTo24Hour(finalConfTime);
     const isCustom = finalConfDate !== req.appointmentDate || (finalConfTime !== req.timeSlot1);
 
-    // --- Invisible Plain Text Body ---
     let bodyText = `Hello,\r\n\r\nRegarding your load booking request for ${req.destination || ''}:\r\n\r\n`;
     bodyText += `ID/PO: ${req.idValue || 'N/A'}\r\n`;
+    bodyText += `Vendor: ${req.vendor || 'N/A'}\r\n`;
     bodyText += `Appointment ID: ${req.appointmentId || 'N/A'}\r\n\r\n`;
 
     if (isCustom) {
-       bodyText += `Unfortunately, your requested preferences are not available. Are you good to proceed with the following proposed time?\r\n\r\n`;
-       bodyText += `Proposed Date: ${finalConfDate}\r\n`;
-       bodyText += `Proposed Time: ${finalConfTime}\r\n\r\n`;
-       bodyText += `Please confirm if this works for you.\r\n\r\n`;
+       bodyText += `Unfortunately, your requested preferences are not available. We have confirmed your appointment to the closest available time slot.\r\n\r\n`;
+       bodyText += `Confirmed Date: ${finalConfDate}\r\n`;
+       bodyText += `Confirmed Time: ${finalConfTime24}\r\n\r\n`;
     } else {
        bodyText += `Your appointment has been confirmed for the following time slot:\r\n\r\n`;
        bodyText += `Confirmed Date: ${finalConfDate}\r\n`;
-       bodyText += `Confirmed Time: ${finalConfTime}\r\n\r\n`;
+       bodyText += `Confirmed Time: ${finalConfTime24}\r\n\r\n`;
     }
+    bodyText += `SAP TM Comments:\r\n${getSapTmComment(req)}\r\n\r\n`;
     bodyText += `Thank you,\r\nHome Depot Appointments Team`;
 
-    // --- Visible HTML Body (Compact Blue Grid Design) ---
-    let htmlBody = `
-    <div style="font-family: Arial, sans-serif; color: #000; font-size: 13px;">
-      <p>Hello,</p>
-      <p>Regarding your load booking request for <strong>${req.destination || ''}</strong>:</p>
-      
-      <table style="width: 100%; max-width: 700px; border-collapse: collapse; border: 1px solid #7ba0cd; margin-top: 15px; margin-bottom: 20px;">
-        <tbody>
-          <tr>
-            <td style="padding: 6px 10px; border: 1px solid #7ba0cd; background-color: #cce0f5; font-weight: bold; width: 35%;">ID / PO:</td>
-            <td style="padding: 6px 10px; border: 1px solid #7ba0cd; font-weight: bold;">${req.idValue || 'N/A'}</td>
-          </tr>
-          <tr>
-            <td style="padding: 6px 10px; border: 1px solid #7ba0cd; background-color: #cce0f5; font-weight: bold;">Appointment ID:</td>
-            <td style="padding: 6px 10px; border: 1px solid #7ba0cd; color: #ea580c; font-weight: bold; font-size: 15px;">${req.appointmentId || 'N/A'}</td>
-          </tr>
-          <tr>
-            <td style="padding: 6px 10px; border: 1px solid #7ba0cd; background-color: #cce0f5; font-weight: bold;">Status:</td>
-            <td style="padding: 6px 10px; border: 1px solid #7ba0cd;">
-               <span style="padding: 3px 6px; font-weight: bold; ${isCustom ? 'background-color: #ffedd5; color: #c2410c;' : 'background-color: #dcfce7; color: #15803d;'}">
-                 ${isCustom ? 'Countered' : 'Confirmed'}
-               </span>
-            </td>
-          </tr>
-          <tr>
-            <td style="padding: 6px 10px; border: 1px solid #7ba0cd; background-color: #cce0f5; font-weight: bold;">Confirmed Date:</td>
-            <td style="padding: 6px 10px; border: 1px solid #7ba0cd;">${finalConfDate}</td>
-          </tr>
-          <tr>
-            <td style="padding: 6px 10px; border: 1px solid #7ba0cd; background-color: #cce0f5; font-weight: bold;">Confirmed Time:</td>
-            <td style="padding: 6px 10px; border: 1px solid #7ba0cd; font-weight: bold;">${finalConfTime}</td>
-          </tr>
-        </tbody>
-      </table>
-      
-      <p style="font-size: 13px;">${isCustom ? '<strong style="color: #ea580c;">Unfortunately, your requested preferences are not available.</strong> Please confirm if the proposed time works for you.' : 'Your appointment has been successfully confirmed.'}</p>
-      <br/>
-      <p style="font-size: 13px;">Thank you,<br/><strong>Home Depot Appointments Team</strong></p>
-    </div>`;
+    const sapTmComment = getSapTmComment(req).replace(/\n/g, '<br>');
 
-    const altBoundary = "----=_NextPart_ALT_" + Date.now().toString(16);
+    let htmlBody = `
+      <div style="font-family: Arial, sans-serif; font-size: 13px; color: #333;">
+        <p>Hello,</p>
+        <p>Regarding your load booking request for <strong>${req.destination || ''}</strong>:</p>
+        
+        <table style="border-collapse: collapse; width: 100%; max-width: 800px; border: 1px solid #b8d4f0; font-size: 13px; margin-bottom: 15px;">
+          <thead>
+            <tr style="background-color: #cce0f5; text-align: left;">
+              <th style="padding: 8px 12px; border: 1px solid #b8d4f0; width: 30%;">Field</th>
+              <th style="padding: 8px 12px; border: 1px solid #b8d4f0; width: 70%;">Value</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td style="padding: 8px 12px; border: 1px solid #b8d4f0; background-color: #cce0f5; font-weight: bold;">Status</td>
+              <td style="padding: 8px 12px; border: 1px solid #b8d4f0;">${isCustom ? '<span style="color: #d97706; font-weight: bold;">Confirmed to the Closest Time Available</span>' : '<span style="color: #16a34a; font-weight: bold;">Confirmed</span>'}</td>
+            </tr>
+            <tr>
+              <td style="padding: 8px 12px; border: 1px solid #b8d4f0; background-color: #cce0f5; font-weight: bold;">Appointment ID</td>
+              <td style="padding: 8px 12px; border: 1px solid #b8d4f0; font-weight: bold;">${req.appointmentId || 'N/A'}</td>
+            </tr>
+            <tr>
+              <td style="padding: 8px 12px; border: 1px solid #b8d4f0; background-color: #cce0f5; font-weight: bold;">${isCustom ? 'Confirmed' : 'Confirmed'} Date</td>
+              <td style="padding: 8px 12px; border: 1px solid #b8d4f0;">${finalConfDate}</td>
+            </tr>
+            <tr>
+              <td style="padding: 8px 12px; border: 1px solid #b8d4f0; background-color: #cce0f5; font-weight: bold;">${isCustom ? 'Confirmed' : 'Confirmed'} Time</td>
+              <td style="padding: 8px 12px; border: 1px solid #b8d4f0;">${finalConfTime24}</td>
+            </tr>
+            <tr>
+              <td style="padding: 8px 12px; border: 1px solid #b8d4f0; background-color: #cce0f5; font-weight: bold;">Destination</td>
+              <td style="padding: 8px 12px; border: 1px solid #b8d4f0;">${req.destination}</td>
+            </tr>
+            <tr>
+              <td style="padding: 8px 12px; border: 1px solid #b8d4f0; background-color: #cce0f5; font-weight: bold;">Load Type</td>
+              <td style="padding: 8px 12px; border: 1px solid #b8d4f0;">${req.loadType || 'N/A'}</td>
+            </tr>
+            <tr>
+              <td style="padding: 8px 12px; border: 1px solid #b8d4f0; background-color: #cce0f5; font-weight: bold;">Vendor</td>
+              <td style="padding: 8px 12px; border: 1px solid #b8d4f0;">${req.vendor || 'N/A'}</td>
+            </tr>
+            <tr>
+              <td style="padding: 8px 12px; border: 1px solid #b8d4f0; background-color: #cce0f5; font-weight: bold;">Carrier</td>
+              <td style="padding: 8px 12px; border: 1px solid #b8d4f0;">${req.carrier || 'N/A'}</td>
+            </tr>
+            <tr>
+              <td style="padding: 8px 12px; border: 1px solid #b8d4f0; background-color: #cce0f5; font-weight: bold;">Trailer Number</td>
+              <td style="padding: 8px 12px; border: 1px solid #b8d4f0;">${req.trailer || 'N/A'}</td>
+            </tr>
+            <tr>
+              <td style="padding: 8px 12px; border: 1px solid #b8d4f0; background-color: #cce0f5; font-weight: bold;">ID / PO</td>
+              <td style="padding: 8px 12px; border: 1px solid #b8d4f0;">${req.idValue || 'N/A'}</td>
+            </tr>
+            <tr>
+              <td style="padding: 8px 12px; border: 1px solid #b8d4f0; background-color: #cce0f5; font-weight: bold;">Number of Skids</td>
+              <td style="padding: 8px 12px; border: 1px solid #b8d4f0;">${req.floorLoaded === 'Yes' ? 'Floor Loaded' : req.skidCount}</td>
+            </tr>
+            <tr>
+              <td style="padding: 8px 12px; border: 1px solid #b8d4f0; background-color: #cce0f5; font-weight: bold;">Comments</td>
+              <td style="padding: 8px 12px; border: 1px solid #b8d4f0;">${req.comments || 'N/A'}</td>
+            </tr>
+            <tr style="background-color: #fffde7;">
+              <td style="padding: 8px 12px; border: 1px solid #fde047; color: #a16207; font-weight: bold;">SAP TM Comments (Copy)</td>
+              <td style="padding: 8px 12px; border: 1px solid #fde047; font-family: monospace; font-weight: bold; font-size: 11px;">${sapTmComment}</td>
+            </tr>
+          </tbody>
+        </table>
+        
+        <p>Thank you,<br>Home Depot Central Scheduling</p>
+      </div>
+    `;
+
+    const boundaryAlternative = "----=_NextPart_Alt_" + Date.now().toString(16);
 
     const emlContent = [
+      `Date: ${new Date().toUTCString()}`,
       `To: ${req.carrierEmail}`,
       ...(req.carrierEmailCC ? [`Cc: ${req.carrierEmailCC}`] : []),
       `Subject: ${subject}`,
@@ -1613,19 +1800,19 @@ export default function App() {
         `In-Reply-To: ${req.originalMessageId}`,
         `References: ${req.originalMessageId}`
       ] : []),
-      `Content-Type: multipart/alternative; boundary="${altBoundary}"`,
+      `Content-Type: multipart/alternative; boundary="${boundaryAlternative}"`,
       ``,
-      `--${altBoundary}`,
+      `--${boundaryAlternative}`,
       `Content-Type: text/plain; charset="UTF-8"`,
       ``,
       bodyText,
       ``,
-      `--${altBoundary}`,
+      `--${boundaryAlternative}`,
       `Content-Type: text/html; charset="UTF-8"`,
       ``,
       htmlBody,
       ``,
-      `--${altBoundary}--`
+      `--${boundaryAlternative}--`
     ].join('\r\n');
 
     const blob = new Blob([emlContent], { type: 'message/rfc822' });
@@ -1643,7 +1830,7 @@ export default function App() {
     
     setAllRequests(prev => prev.map(item => 
       item.id === req.id 
-        ? { ...item, status: isCustom ? 'Countered' : 'Scheduled' } 
+        ? { ...item, status: isCustom ? 'Confirmed to the Closest Time Available' : 'Scheduled' } 
         : item
     ));
   };
@@ -1675,92 +1862,102 @@ export default function App() {
          subject = `RE: Load Booking Request Confirmations (${group.length} Shipments) - ${firstReq.destination}`;
        }
 
-       // --- Invisible Plain Text Body ---
        let bodyText = `Hello,\r\n\r\nRegarding your load booking request(s):\r\n\r\n`;
+       
+       let htmlBody = `
+         <div style="font-family: Arial, sans-serif; font-size: 13px; color: #333;">
+           <p>Hello,</p>
+           <p>Regarding your load booking request(s) for <strong>${firstReq.destination}</strong>:</p>
+       `;
 
-       group.forEach(req => {
+       group.forEach((req, index) => {
          const finalConfDate = req.confirmedDate || req.appointmentDate;
          const finalConfTime = req.confirmedTimeSlot || req.timeSlot1;
+         const finalConfTime24 = formatTo24Hour(finalConfTime);
          const isCustom = finalConfDate !== req.appointmentDate || (finalConfTime !== req.timeSlot1);
          if (isCustom) hasCustom = true;
 
          bodyText += `--- ID/PO: ${req.idValue || 'N/A'} ---\r\n`;
          bodyText += `Destination: ${req.destination || ''}\r\n`;
+         bodyText += `Vendor: ${req.vendor || 'N/A'}\r\n`;
          bodyText += `Appointment ID: ${req.appointmentId || 'N/A'}\r\n`;
          
          if (isCustom) {
-            bodyText += `Status: Countered - Requested time unavailable.\r\n`;
-            bodyText += `Proposed Date: ${finalConfDate}\r\n`;
-            bodyText += `Proposed Time: ${finalConfTime}\r\n\r\n`;
+            bodyText += `Status: Confirmed to the Closest Time Available.\r\n`;
+            bodyText += `Confirmed Date: ${finalConfDate}\r\n`;
+            bodyText += `Confirmed Time: ${finalConfTime24}\r\n\r\n`;
          } else {
             bodyText += `Status: Confirmed\r\n`;
             bodyText += `Confirmed Date: ${finalConfDate}\r\n`;
-            bodyText += `Confirmed Time: ${finalConfTime}\r\n\r\n`;
+            bodyText += `Confirmed Time: ${finalConfTime24}\r\n\r\n`;
          }
+         
+         bodyText += `SAP TM Comments:\r\n${getSapTmComment(req)}\r\n\r\n`;
+
+         const sapTmComment = getSapTmComment(req).replace(/\n/g, '<br>');
+
+         htmlBody += `
+           <table style="border-collapse: collapse; width: 100%; max-width: 800px; border: 1px solid #b8d4f0; font-size: 13px; margin-bottom: 20px;">
+             <thead>
+               <tr style="background-color: #cce0f5; text-align: left;">
+                 <th colspan="2" style="padding: 8px 12px; border: 1px solid #b8d4f0;">Shipment ${index + 1} - ${req.idValue || 'N/A'}</th>
+               </tr>
+             </thead>
+             <tbody>
+               <tr>
+                 <td style="padding: 8px 12px; border: 1px solid #b8d4f0; background-color: #e6f0fa; font-weight: bold; width: 30%;">Status</td>
+                 <td style="padding: 8px 12px; border: 1px solid #b8d4f0; width: 70%;">${isCustom ? '<span style="color: #d97706; font-weight: bold;">Confirmed to the Closest Time Available</span>' : '<span style="color: #16a34a; font-weight: bold;">Confirmed</span>'}</td>
+               </tr>
+               <tr>
+                 <td style="padding: 8px 12px; border: 1px solid #b8d4f0; background-color: #e6f0fa; font-weight: bold;">Appointment ID</td>
+                 <td style="padding: 8px 12px; border: 1px solid #b8d4f0; font-weight: bold;">${req.appointmentId || 'N/A'}</td>
+               </tr>
+               <tr>
+                 <td style="padding: 8px 12px; border: 1px solid #b8d4f0; background-color: #e6f0fa; font-weight: bold;">${isCustom ? 'Confirmed' : 'Confirmed'} Date</td>
+                 <td style="padding: 8px 12px; border: 1px solid #b8d4f0;">${finalConfDate}</td>
+               </tr>
+               <tr>
+                 <td style="padding: 8px 12px; border: 1px solid #b8d4f0; background-color: #e6f0fa; font-weight: bold;">${isCustom ? 'Confirmed' : 'Confirmed'} Time</td>
+                 <td style="padding: 8px 12px; border: 1px solid #b8d4f0;">${finalConfTime24}</td>
+               </tr>
+               <tr>
+                 <td style="padding: 8px 12px; border: 1px solid #b8d4f0; background-color: #e6f0fa; font-weight: bold;">Load Type</td>
+                 <td style="padding: 8px 12px; border: 1px solid #b8d4f0;">${req.loadType || 'N/A'}</td>
+               </tr>
+               <tr>
+                 <td style="padding: 8px 12px; border: 1px solid #b8d4f0; background-color: #e6f0fa; font-weight: bold;">Vendor</td>
+                 <td style="padding: 8px 12px; border: 1px solid #b8d4f0;">${req.vendor || 'N/A'}</td>
+               </tr>
+               <tr>
+                 <td style="padding: 8px 12px; border: 1px solid #b8d4f0; background-color: #e6f0fa; font-weight: bold;">Trailer Number</td>
+                 <td style="padding: 8px 12px; border: 1px solid #b8d4f0;">${req.trailer || 'N/A'}</td>
+               </tr>
+               <tr>
+                 <td style="padding: 8px 12px; border: 1px solid #b8d4f0; background-color: #e6f0fa; font-weight: bold;">Number of Skids</td>
+                 <td style="padding: 8px 12px; border: 1px solid #b8d4f0;">${req.floorLoaded === 'Yes' ? 'Floor Loaded' : req.skidCount}</td>
+               </tr>
+               <tr style="background-color: #fffde7;">
+                 <td style="padding: 8px 12px; border: 1px solid #fde047; color: #a16207; font-weight: bold;">SAP TM Comments (Copy)</td>
+                 <td style="padding: 8px 12px; border: 1px solid #fde047; font-family: monospace; font-weight: bold; font-size: 11px;">${sapTmComment}</td>
+               </tr>
+             </tbody>
+           </table>
+         `;
 
          updatedRequests = updatedRequests.map(item => 
            item.id === req.id 
-             ? { ...item, status: isCustom ? 'Countered' : 'Scheduled' } 
+             ? { ...item, status: isCustom ? 'Confirmed to the Closest Time Available' : 'Scheduled' } 
              : item
          );
        });
 
-       if (hasCustom) {
-          bodyText += `Please confirm if the proposed times work for you.\r\n\r\n`;
-       }
-
        bodyText += `Thank you,\r\nHome Depot Central Scheduling`;
+       htmlBody += `<p>Thank you,<br>Home Depot Central Scheduling</p></div>`;
 
-       // --- Visible HTML Body (Compact Blue Grid Design) ---
-       let htmlBody = `
-       <div style="font-family: Arial, sans-serif; color: #000; font-size: 13px;">
-         <p>Hello,</p>
-         <p>Regarding your load booking request(s):</p>
-         
-         <table style="width: 100%; max-width: 850px; border-collapse: collapse; border: 1px solid #7ba0cd; margin-top: 15px; margin-bottom: 25px;">
-           <thead>
-             <tr>
-               <th style="padding: 6px; border: 1px solid #7ba0cd; text-align: left; background-color: #cce0f5; font-size: 12px; width: 15%;">ID / PO</th>
-               <th style="padding: 6px; border: 1px solid #7ba0cd; text-align: left; background-color: #cce0f5; font-size: 12px; width: 25%;">Destination</th>
-               <th style="padding: 6px; border: 1px solid #7ba0cd; text-align: left; background-color: #cce0f5; font-size: 12px; width: 15%;">Appt ID</th>
-               <th style="padding: 6px; border: 1px solid #7ba0cd; text-align: left; background-color: #cce0f5; font-size: 12px; width: 15%;">Status</th>
-               <th style="padding: 6px; border: 1px solid #7ba0cd; text-align: left; background-color: #cce0f5; font-size: 12px; width: 15%;">Conf. Date</th>
-               <th style="padding: 6px; border: 1px solid #7ba0cd; text-align: left; background-color: #cce0f5; font-size: 12px; width: 15%;">Conf. Time</th>
-             </tr>
-           </thead>
-           <tbody>`;
-
-       group.forEach(req => {
-         const finalConfDate = req.confirmedDate || req.appointmentDate;
-         const finalConfTime = req.confirmedTimeSlot || req.timeSlot1;
-         const isCustom = finalConfDate !== req.appointmentDate || (finalConfTime !== req.timeSlot1);
-
-         htmlBody += `
-          <tr>
-            <td style="padding: 6px; border: 1px solid #7ba0cd; font-weight: bold; background-color: #e6f0fa;">${req.idValue || 'N/A'}</td>
-            <td style="padding: 6px; border: 1px solid #7ba0cd;">${req.destination || ''}</td>
-            <td style="padding: 6px; border: 1px solid #7ba0cd; color: #ea580c; font-weight: bold; font-size: 14px; background-color: #e6f0fa;">${req.appointmentId || 'N/A'}</td>
-            <td style="padding: 6px; border: 1px solid #7ba0cd;">
-               <span style="font-weight: bold; font-size: 12px; ${isCustom ? 'color: #c2410c;' : 'color: #15803d;'}">
-                 ${isCustom ? 'Countered' : 'Confirmed'}
-               </span>
-            </td>
-            <td style="padding: 6px; border: 1px solid #7ba0cd; background-color: #e6f0fa;">${finalConfDate}</td>
-            <td style="padding: 6px; border: 1px solid #7ba0cd; font-weight: bold;">${finalConfTime}</td>
-          </tr>`;
-       });
-
-       htmlBody += `
-           </tbody>
-         </table>
-         <p style="font-size: 13px;">${hasCustom ? '<strong style="color: #ea580c;">One or more requests have been countered.</strong> Please confirm if the proposed times work for you.' : 'Your appointments have been successfully confirmed.'}</p>
-         <br/>
-         <p style="font-size: 13px;">Thank you,<br/><strong>Home Depot Central Scheduling</strong></p>
-       </div>`;
-
-       const altBoundary = "----=_NextPart_ALT_" + Date.now().toString(16);
+       const boundaryAlternative = "----=_NextPart_Alt_" + Date.now().toString(16);
 
        const emlContent = [
+         `Date: ${new Date().toUTCString()}`,
          `To: ${carrierEmail || ''}`,
          ...(groupCCs ? [`Cc: ${groupCCs}`] : []),
          `Subject: ${subject}`,
@@ -1769,19 +1966,19 @@ export default function App() {
            `In-Reply-To: ${firstReq.originalMessageId}`,
            `References: ${firstReq.originalMessageId}`
          ] : []),
-         `Content-Type: multipart/alternative; boundary="${altBoundary}"`,
+         `Content-Type: multipart/alternative; boundary="${boundaryAlternative}"`,
          ``,
-         `--${altBoundary}`,
+         `--${boundaryAlternative}`,
          `Content-Type: text/plain; charset="UTF-8"`,
          ``,
          bodyText,
          ``,
-         `--${altBoundary}`,
+         `--${boundaryAlternative}`,
          `Content-Type: text/html; charset="UTF-8"`,
          ``,
          htmlBody,
          ``,
-         `--${altBoundary}--`
+         `--${boundaryAlternative}--`
        ].join('\r\n');
 
        const blob = new Blob([emlContent], { type: 'message/rfc822' });
@@ -1812,6 +2009,7 @@ export default function App() {
   const getStatusBadge = (status) => {
     switch(status) {
       case 'Scheduled': return 'bg-green-100 text-green-800 border-green-200';
+      case 'Confirmed to the Closest Time Available': return 'bg-orange-100 text-orange-800 border-orange-200';
       case 'Countered': return 'bg-orange-100 text-orange-800 border-orange-200';
       case 'Requested': default: return 'bg-blue-50 text-blue-700 border-blue-200';
     }
@@ -1831,18 +2029,7 @@ export default function App() {
     ];
 
     const rows = allRequests.map(req => {
-      const vendor = (req.vendor || '').toUpperCase();
-      const idType = req.idType === 'Shipment ID' ? 'FO' : (req.idType || 'PO');
-      const firstId = (req.idValue || '').split(',')[0].trim();
-      
-      let suffix = '';
-      if (req.destination && req.destination.includes('7340') && req.boltonTrailerType) {
-        if (req.boltonTrailerType.includes('Vendor')) suffix = '\n-VEN-';
-        else if (req.boltonTrailerType.includes('Innovation Centre')) suffix = '\n-IC-';
-        else if (req.boltonTrailerType.includes('Miscellaneous') || req.boltonTrailerType.includes('Misc')) suffix = '\n-MISC-';
-      }
-
-      const sapTmComment = `${vendor}\n${idType === 'FO' ? firstId : idType + ' ' + firstId}\n${req.skidCount || 0} SKIDS${suffix}`;
+      const sapTmComment = getSapTmComment(req);
 
       return [
         req.id, req.sourceFile, req.timestamp, req.status, req.region, req.destination,
@@ -1884,7 +2071,7 @@ export default function App() {
   };
 
   const processedSlots = useMemo(() => {
-      return slotMatrix.filter(slot => {
+      let filtered = slotMatrix.filter(slot => {
           if (slotFilters.facilityId.length > 0 && !slotFilters.facilityId.includes(String(slot['Facility ID'] || '').trim())) return false;
           if (slotFilters.date.length > 0 && !slotFilters.date.includes(String(slot.Date || slot['Start Date'] || slot.date || '').trim())) return false;
           
@@ -1910,7 +2097,28 @@ export default function App() {
 
           return true;
       });
-  }, [slotMatrix, slotFilters]);
+
+      if (slotSortConfig.key) {
+         filtered.sort((a, b) => {
+            let aVal = a[slotSortConfig.key] || '';
+            let bVal = b[slotSortConfig.key] || '';
+            
+            if (slotSortConfig.key === 'Date' || slotSortConfig.key === 'Time') {
+                if (aVal < bVal) return slotSortConfig.direction === 'asc' ? -1 : 1;
+                if (aVal > bVal) return slotSortConfig.direction === 'asc' ? 1 : -1;
+                return 0;
+            }
+
+            if (!isNaN(aVal) && !isNaN(bVal)) {
+                return slotSortConfig.direction === 'asc' ? Number(aVal) - Number(bVal) : Number(bVal) - Number(aVal);
+            }
+
+            return slotSortConfig.direction === 'asc' ? String(aVal).localeCompare(String(bVal)) : String(bVal).localeCompare(String(aVal));
+         });
+      }
+
+      return filtered;
+  }, [slotMatrix, slotFilters, slotSortConfig]);
 
   const slotHeaders = useMemo(() => {
       if (slotMatrix.length === 0) return [];
@@ -1998,7 +2206,7 @@ export default function App() {
               </div>
            )}
 
-           <div className="max-w-[105rem] mx-auto">
+           <div className="w-full mx-auto">
               <div className="flex flex-col md:flex-row justify-between items-start md:items-center mb-6 gap-4">
                 <div>
                   <h2 className="text-2xl font-bold text-slate-800">Email Compiler</h2>
@@ -2059,6 +2267,7 @@ export default function App() {
                             title="Select all filtered pending requests"
                           />
                         </th>
+                        <th className="px-4 py-3 select-none w-10 text-center text-slate-400">#</th>
                         <th className="px-4 py-3 cursor-pointer hover:bg-slate-200 transition-colors select-none" onClick={() => requestSort('timestamp')}>
                           <div className="flex items-center gap-1">Received {getSortIcon('timestamp')}</div>
                         </th>
@@ -2107,12 +2316,13 @@ export default function App() {
                       <tr className="bg-slate-100 border-b border-slate-200">
                         <th className="px-2 py-2"></th>
                         <th className="px-2 py-2"></th>
+                        <th className="px-2 py-2"></th>
                         <th className="px-2 py-2">
                           <select className="w-full px-2 py-1.5 rounded border border-slate-300 text-xs font-normal outline-none focus:border-[#f96302]" value={filters.status} onChange={e => setFilters({...filters, status: e.target.value})}>
                             <option value="">All</option>
                             <option value="Requested">Requested</option>
                             <option value="Scheduled">Scheduled</option>
-                            <option value="Countered">Countered</option>
+                            <option value="Confirmed to the Closest Time Available">Confirmed to Closest Time</option>
                           </select>
                         </th>
                         <th className="px-2 py-2">
@@ -2161,7 +2371,7 @@ export default function App() {
                     <tbody className="divide-y divide-slate-100">
                       {allRequests.length === 0 ? (
                         <tr>
-                           <td colSpan="16" className="px-4 py-16 text-center">
+                           <td colSpan="17" className="px-4 py-16 text-center">
                               <div className="flex flex-col items-center justify-center text-slate-400">
                                  <UploadCloud className="w-16 h-16 mb-4 text-slate-300" />
                                  <p className="text-lg font-medium text-slate-500">No requests compiled yet.</p>
@@ -2171,7 +2381,7 @@ export default function App() {
                         </tr>
                       ) : processedRequests.length === 0 ? (
                         <tr>
-                           <td colSpan="16" className="px-4 py-16 text-center text-slate-500 font-medium">
+                           <td colSpan="17" className="px-4 py-16 text-center text-slate-500 font-medium">
                               No requests match your current filters.
                            </td>
                         </tr>
@@ -2190,6 +2400,7 @@ export default function App() {
                                 <CheckCircle2 className="w-4 h-4 text-slate-300 mx-auto" />
                               )}
                             </td>
+                            <td className="px-4 py-3 text-center font-bold text-slate-400 text-xs">{idx + 1}</td>
                             <td className="px-4 py-3 text-slate-500 text-xs">{req.displayTime}</td>
                             <td className="px-4 py-3">
                               <span className={`px-2.5 py-1 rounded-full text-xs font-bold border ${getStatusBadge(req.status)}`}>
@@ -2215,7 +2426,7 @@ export default function App() {
                             
                             <td className="px-4 py-3">
                               <div className="flex items-center gap-1.5">
-                                <span className="text-slate-600 font-medium">{req.skidCount}</span>
+                                <span className="text-slate-600 font-medium">{req.floorLoaded === 'Yes' ? 'Floor' : req.skidCount}</span>
                                 {req.exceptionFlag && (
                                   <AlertCircle className="w-4 h-4 text-red-500" title="Exception: Exceeds Skid Limit for Live Load" />
                                 )}
@@ -2231,42 +2442,28 @@ export default function App() {
                             </td>
 
                             <td className="px-4 py-3 min-w-[180px]">
-                              <div className="bg-[#ffffcc] border border-yellow-300 p-2.5 rounded text-xs font-mono font-bold whitespace-pre-wrap relative group text-slate-900 shadow-sm leading-relaxed">
-                                {(() => {
-                                  const vendor = (req.vendor || '').toUpperCase();
-                                  const idType = req.idType === 'Shipment ID' ? 'FO' : (req.idType || 'PO');
-                                  const firstId = (req.idValue || '').split(',')[0].trim();
-                                  const skids = `${req.skidCount || 0} SKIDS`;
-                                  
-                                  let suffix = '';
-                                  if (req.destination && req.destination.includes('7340') && req.boltonTrailerType) {
-                                    if (req.boltonTrailerType.includes('Vendor')) suffix = '\n-VEN-';
-                                    else if (req.boltonTrailerType.includes('Innovation Centre')) suffix = '\n-IC-';
-                                    else if (req.boltonTrailerType.includes('Miscellaneous') || req.boltonTrailerType.includes('Misc')) suffix = '\n-MISC-';
-                                  }
-
-                                  const copyText = `${vendor}\n${idType === 'FO' ? firstId : idType + ' ' + firstId}\n${skids}${suffix}`;
-                                  
-                                  return (
-                                    <>
-                                      <div className="select-all text-center">{copyText}</div>
-                                      <button 
-                                        onClick={() => {
-                                          const textArea = document.createElement("textarea");
-                                          textArea.value = copyText;
-                                          document.body.appendChild(textArea);
-                                          textArea.select();
-                                          document.execCommand('copy');
-                                          textArea.remove();
-                                        }}
-                                        className="absolute top-1 right-1 p-1.5 bg-white hover:bg-slate-100 border border-slate-200 rounded text-slate-500 opacity-0 group-hover:opacity-100 transition-opacity"
-                                        title="Copy to clipboard"
-                                      >
-                                        <FileText className="w-3.5 h-3.5" />
-                                      </button>
-                                    </>
-                                  );
-                                })()}
+                              <div className="relative group/copy w-full min-w-[160px] mx-auto">
+                                <textarea
+                                  value={getSapTmComment(req)}
+                                  onChange={(e) => setAllRequests(prev => prev.map(r => r.id === req.id ? { ...r, customSapTmComment: e.target.value } : r))}
+                                  className="bg-[#ffffcc] border border-yellow-300 p-2.5 rounded text-[11px] font-mono font-bold whitespace-pre-wrap text-slate-900 shadow-sm leading-tight w-full resize-y text-center focus:outline-none focus:border-[#f96302] focus:ring-1 focus:ring-[#f96302]"
+                                  rows={Math.max(3, getSapTmComment(req).split('\n').length)}
+                                />
+                                <button 
+                                  onClick={() => {
+                                    const copyText = getSapTmComment(req);
+                                    const textArea = document.createElement("textarea");
+                                    textArea.value = copyText;
+                                    document.body.appendChild(textArea);
+                                    textArea.select();
+                                    document.execCommand('copy');
+                                    textArea.remove();
+                                  }}
+                                  className="absolute -top-2 -right-2 bg-slate-800 text-white p-1.5 rounded-md opacity-0 group-hover/copy:opacity-100 transition-opacity shadow-md hover:bg-slate-700 flex items-center gap-1 z-10"
+                                  title="Copy to Clipboard"
+                                >
+                                  <FileText className="w-3 h-3" />
+                                </button>
                               </div>
                             </td>
 
@@ -2380,7 +2577,7 @@ export default function App() {
                {activeReplyReq.exceptionFlag && (
                  <div className="bg-red-50 text-red-800 p-3 rounded-md border border-red-200 text-sm flex items-start gap-2">
                    <AlertTriangle className="w-5 h-5 flex-shrink-0" />
-                   <p><strong>Exception:</strong> This request exceeds skid limits for a Live Load. You may need to counter this request.</p>
+                   <p><strong>Exception:</strong> This request exceeds skid limits for a Live Load. You may need to provide an alternate time.</p>
                  </div>
                )}
 
@@ -2539,12 +2736,26 @@ export default function App() {
                     </div>
                     {formErrors.loadType && <p className="text-red-500 text-xs mt-1">{formErrors.loadType}</p>}
                     
-                    {formData.loadType === 'Live Load' && formData.applianceDropOff !== 'Yes' && (
+                    <div className="mt-4 pt-4 border-t border-slate-200">
+                      <label className="block text-sm font-bold text-slate-700">Is the trailer Floor Loaded? <span className="text-red-500">*</span></label>
+                      <div className="flex gap-4 mt-2">
+                        <label className={`flex-1 flex items-center justify-center p-3 border rounded-lg cursor-pointer transition-colors ${formData.floorLoaded === 'Yes' ? 'border-[#f96302] bg-orange-50 text-orange-900 font-bold' : 'hover:bg-slate-50 text-slate-600'}`}>
+                          <input type="radio" name="floorLoaded" value="Yes" className="hidden" checked={formData.floorLoaded === 'Yes'} onChange={handleInputChange} />
+                          Yes
+                        </label>
+                        <label className={`flex-1 flex items-center justify-center p-3 border rounded-lg cursor-pointer transition-colors ${formData.floorLoaded === 'No' ? 'border-[#f96302] bg-orange-50 text-orange-900 font-bold' : 'hover:bg-slate-50 text-slate-600'}`}>
+                          <input type="radio" name="floorLoaded" value="No" className="hidden" checked={formData.floorLoaded === 'No'} onChange={handleInputChange} />
+                          No (Palletized)
+                        </label>
+                      </div>
+                    </div>
+
+                    {formData.loadType === 'Live Load' && (formData.destination.includes('7275') || formData.destination.includes('7410')) && formData.applianceDropOff !== 'Yes' && formData.floorLoaded !== 'Yes' && (
                       <div className="mt-3 p-3 bg-amber-50 border border-amber-200 rounded-lg flex items-start gap-3">
                         <AlertTriangle className="w-5 h-5 text-amber-600 flex-shrink-0" />
                         <div>
                           <p className="text-sm text-amber-800 font-medium">Live Load Warning</p>
-                          <p className="text-xs text-amber-700 mt-1 mb-2">Live loads must be 15 skids or less per shipment (Max {15 * formData.ids.length} total for this request). If you select more than this limit, it will automatically be converted into a drop load.</p>
+                          <p className="text-xs text-amber-700 mt-1 mb-2">Live loads at this facility must be 15 skids or less per shipment (Max {15 * formData.ids.length} total for this request). If you select more than this limit, it will automatically be converted into a drop load.</p>
                           <label className="flex items-center gap-2 text-sm text-amber-900 font-medium cursor-pointer">
                             <input type="checkbox" name="liveLoadAcknowledged" checked={formData.liveLoadAcknowledged} onChange={handleInputChange} className="accent-amber-600 w-4 h-4 rounded" />
                             I acknowledge
@@ -2574,9 +2785,9 @@ export default function App() {
 
                 <div className="space-y-4">
                   {formData.ids.map((idObj, index) => {
-                    const currentDateError = idObj.date ? checkDateError(idObj.date, formData.region) : null;
+                    const currentDateError = idObj.date ? checkDateError(idObj.date, formData.region, formData.destination, formData.loadType) : null;
                     const is247DropFacility = formData.region === 'East' && 
-                                              (formData.destination.includes('7275') || formData.destination.includes('7340')) && 
+                                              (formData.destination.includes('7275') || formData.destination.includes('7340') || formData.destination.includes('7410')) && 
                                               formData.loadType === 'Drop Load';
                     const currentTimeError = idObj.timeSlot ? checkTimeSlotError(idObj.date, idObj.timeSlot, formData.region, is247DropFacility) : null;
                     
@@ -2650,7 +2861,7 @@ export default function App() {
                               <Calendar className="w-4 h-4 absolute left-3 top-3 text-slate-400" />
                               <input 
                                 type="date" 
-                                min={formData.region ? calculateTargetDate(formData.region) : ''}
+                                min={formData.region ? calculateTargetDate(formData.region, formData.destination, formData.loadType) : ''}
                                 value={idObj.date} 
                                 onChange={(e) => handleIdChange(index, 'date', e.target.value)} 
                                 className={`w-full pl-9 p-2.5 border rounded-lg outline-none shadow-sm text-sm transition-colors ${(formErrors[`id_${index}_date`] || currentDateError) ? 'border-red-500 bg-red-50 text-red-900' : 'border-slate-300 focus:border-[#f96302]'}`}
@@ -2707,15 +2918,21 @@ export default function App() {
                           </div>
 
                           <div className="space-y-2">
-                            <label className="block text-xs font-bold text-slate-500 uppercase tracking-wide">SKID Count <span className="text-red-500">*</span></label>
-                            <input 
-                              type="number" 
-                              value={idObj.skidCount} 
-                              onChange={(e) => handleIdChange(index, 'skidCount', e.target.value)} 
-                              placeholder="e.g. 12"
-                              className={`w-full p-2.5 border rounded-lg outline-none shadow-sm text-sm transition-colors ${formErrors[`id_${index}_skidCount`] ? 'border-red-500 bg-red-50' : 'border-slate-300 focus:border-[#f96302]'}`}
-                            />
-                            {formErrors[`id_${index}_skidCount`] && <p className="text-red-500 text-xs mt-1">{formErrors[`id_${index}_skidCount`]}</p>}
+                            <label className="block text-xs font-bold text-slate-500 uppercase tracking-wide">SKID Count {formData.floorLoaded !== 'Yes' && <span className="text-red-500">*</span>}</label>
+                            {formData.floorLoaded === 'Yes' ? (
+                                <div className="w-full p-2.5 border border-slate-200 bg-slate-100 rounded-lg text-sm text-slate-500 font-medium cursor-not-allowed">
+                                  Floor Loaded
+                                </div>
+                            ) : (
+                                <input 
+                                  type="number" 
+                                  value={idObj.skidCount} 
+                                  onChange={(e) => handleIdChange(index, 'skidCount', e.target.value)} 
+                                  placeholder="e.g. 12"
+                                  className={`w-full p-2.5 border rounded-lg outline-none shadow-sm text-sm transition-colors ${formErrors[`id_${index}_skidCount`] ? 'border-red-500 bg-red-50' : 'border-slate-300 focus:border-[#f96302]'}`}
+                                />
+                            )}
+                            {formData.floorLoaded !== 'Yes' && formErrors[`id_${index}_skidCount`] && <p className="text-red-500 text-xs mt-1">{formErrors[`id_${index}_skidCount`]}</p>}
                           </div>
 
                           <div className="space-y-2">
@@ -2918,7 +3135,7 @@ export default function App() {
       {/* --- 7411 Appointment Slots View --- */}
       {viewMode === 'slots' && (
         <main className="flex-1 overflow-y-auto p-6 transition-colors bg-slate-100">
-           <div className="max-w-[105rem] mx-auto">
+           <div className="w-full mx-auto">
               <div className="flex flex-col md:flex-row justify-between items-start md:items-center mb-6 gap-4">
                 <div>
                   <h2 className="text-2xl font-bold text-slate-800">7411 Appointment Slots</h2>
@@ -2980,7 +3197,9 @@ export default function App() {
                        <thead className="bg-slate-50 text-slate-600 border-b border-slate-200 font-semibold uppercase text-xs">
                          <tr>
                            {slotHeaders.map(key => (
-                             <th key={key} className="px-4 py-3">{key}</th>
+                             <th key={key} className="px-4 py-3 cursor-pointer hover:bg-slate-200 transition-colors select-none" onClick={() => slotRequestSort(key)}>
+                                <div className="flex items-center gap-1">{key} {getSlotSortIcon(key)}</div>
+                             </th>
                            ))}
                          </tr>
                        </thead>
