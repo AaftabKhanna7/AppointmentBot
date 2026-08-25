@@ -23,11 +23,7 @@ const getAvailableTimeSlots = (dateStr, region) => {
   const allSlots = ALL_TIME_SLOTS;
   if (!dateStr || !region) return allSlots;
 
-  // For DC to DC Transfers, we default to Eastern time for cutoff processing, 
-  // or we can deduce it from destination. Safest fallback is Eastern.
-  let timeZone = 'America/New_York';
-  if (region === 'West') timeZone = 'America/Denver';
-
+  const timeZone = region === 'East' ? 'America/New_York' : 'America/Denver';
   const now = new Date(new Date().toLocaleString("en-US", { timeZone }));
 
   const year = now.getFullYear();
@@ -57,9 +53,7 @@ const getAvailableTimeSlots = (dateStr, region) => {
 
 // Helper to check cutoff warnings
 const checkCutoffTime = (region) => {
-  let timeZone = 'America/New_York';
-  if (region === 'West') timeZone = 'America/Denver';
-  
+  const timeZone = region === 'East' ? 'America/New_York' : 'America/Denver';
   const localDateString = new Date().toLocaleString("en-US", { timeZone });
   const localDate = new Date(localDateString);
   const day = localDate.getDay(); 
@@ -80,9 +74,7 @@ const checkCutoffTime = (region) => {
 
 // Helper to precisely calculate the Target Date based on Cutoff rules
 const calculateTargetDate = (region, destination, loadType) => {
-  let timeZone = 'America/New_York';
-  if (region === 'West') timeZone = 'America/Denver';
-  
+  const timeZone = region === 'East' ? 'America/New_York' : 'America/Denver';
   const localDateString = new Date().toLocaleString("en-US", { timeZone });
   const localDate = new Date(localDateString);
   const nowForCalc = new Date(localDateString);
@@ -241,9 +233,7 @@ const checkDateError = (dateStr, region, destination, loadType) => {
       }
   }
 
-  let timeZone = 'America/New_York';
-  if (region === 'West') timeZone = 'America/Denver';
-  
+  const timeZone = region === 'East' ? 'America/New_York' : 'America/Denver';
   const nowForCalc = new Date(new Date().toLocaleString("en-US", { timeZone }));
   const currentDay = nowForCalc.getDay();
   const currentHour = nowForCalc.getHours();
@@ -284,25 +274,15 @@ const checkTimeSlotError = (dateStr, timeSlot, region, is247DropFacility) => {
 const initialFormState = {
   needsAppointment: 'Yes',
   region: '',
-  origin: '',
   destination: '',
   applianceDropOff: 'N/A',
-  applianceFirstMile: 'N/A',
   loadType: '',
   floorLoaded: 'No',
   boltonTrailerType: '',
   liveLoadAcknowledged: false,
   ids: [{ identifiers: [{ type: 'Shipment ID', value: '' }], date: '', timeSlot: '', skidCount: '', comments: '' }],
-  
-  dcTransferData: {
-    seal: '', weight: '', pallets: '', cartons: '', fb: '', fb2: '', bol: '', bol2: '', tu: '', tu2: '', sapBol: '', cube: '', scac: '', tms: '', freezable: 'No', loadOrder: '', preferredDate: '', comments: ''
-  },
-  
   hasBol: '',
   bolFiles: [],
-  hasObtr: '',
-  obtrFiles: [],
-  
   vendor: '',
   carrier: '',
   carrierEmail: '',
@@ -472,16 +452,381 @@ export default function App() {
       return slotSortConfig.direction === 'asc' ? <ArrowUp className="w-3 h-3 text-[#f96302]" /> : <ArrowDown className="w-3 h-3 text-[#f96302]" />;
   };
 
-  const removeFile = (idx, fileTypeArray) => {
+  const removeFile = (idx, fileTypeArray) => { 
       setFormData(prev => ({ 
           ...prev, 
           [fileTypeArray]: prev[fileTypeArray].filter((_, i) => i !== idx) 
       }));
   };
   
-  const handleTMSyncUpload = (e) => { e.target.value = null; };
-  const handleSlotMatrixUpload = (e) => { e.target.value = null; };
-  const handleSlotTMSyncUpload = (e) => { e.target.value = null; };
+  // Dynamically load external scripts without requiring an npm install
+  const injectScript = (src) => {
+    return new Promise((resolve, reject) => {
+      if (document.querySelector(`script[src="${src}"]`)) {
+        resolve();
+        return;
+      }
+      const script = document.createElement('script');
+      script.src = src;
+      script.async = true;
+      script.onload = resolve;
+      script.onerror = reject;
+      document.head.appendChild(script);
+    });
+  };
+
+  const handleTMSyncUpload = async (e) => {
+    const file = e.target.files[0];
+    if (!file) return;
+
+    try {
+      await injectScript('https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js');
+
+      const reader = new FileReader();
+      reader.onload = (event) => {
+        try {
+          const data = new Uint8Array(event.target.result);
+          const workbook = window.XLSX.read(data, { type: 'array' });
+          const firstSheetName = workbook.SheetNames[0];
+          const worksheet = workbook.Sheets[firstSheetName];
+          
+          // 1. Read file as raw 2D array, ensuring raw: false so we get exactly the text in Excel (prevents scientific notation)
+          const rawRows = window.XLSX.utils.sheet_to_json(worksheet, { header: 1, defval: "", raw: false });
+          
+          // 2. Intelligently scan down to find the actual table headers
+          let headerRowIdx = 0;
+          let headers = [];
+          for (let i = 0; i < Math.min(20, rawRows.length); i++) {
+              if (!rawRows[i]) continue;
+              const rowStrings = rawRows[i].map(v => String(v).toLowerCase().replace(/[^a-z0-9]/g, ''));
+              if (rowStrings.some(s => s.includes('freightorder') || s.includes('shipment') || s.includes('document') || s.includes('torid') || s.includes('appt') || s.includes('appointment'))) {
+                  headerRowIdx = i;
+                  headers = rowStrings;
+                  break;
+              }
+          }
+
+          if (headers.length === 0 && rawRows.length > 0) {
+              headers = rawRows[0].map(v => String(v).toLowerCase().replace(/[^a-z0-9]/g, ''));
+          }
+
+          // 3. Map data cleanly against the true headers
+          const normalizedTMData = rawRows.slice(headerRowIdx + 1).map((rowArray) => {
+              const rowObj = { _rawRowArray: rowArray }; // Keep raw array for fallback
+              headers.forEach((h, idx) => {
+                  if (h) rowObj[h] = String(rowArray[idx] || '').trim();
+              });
+              return rowObj;
+          });
+
+          setAllRequests(prevReqs => {
+            let updatedCount = 0;
+            const nextReqs = prevReqs.map(req => {
+              // Update if appointment ID is empty
+              if (req.appointmentId && req.appointmentId.trim() !== '') return req;
+
+              let foundApptId = '';
+              const reqIds = (req.idValue || '').split(',').map(s => s.trim().replace(/^0+/, '')).filter(Boolean);
+
+              for (let rId of reqIds) {
+                if (!rId) continue;
+                
+                // Find row
+                const matchedRow = normalizedTMData.find(tmRow => {
+                    // Check known columns first
+                    const tmFo = (
+                        tmRow['freightorder'] || 
+                        tmRow['freightordernumber'] || 
+                        tmRow['document'] || 
+                        tmRow['documentnumber'] || 
+                        tmRow['shipment'] || 
+                        tmRow['shipmentid'] || 
+                        tmRow['purchasingdocument'] || 
+                        tmRow['torid'] || 
+                        tmRow['id'] || 
+                        ''
+                    ).replace(/^0+/, '');
+                    
+                    if (tmFo === rId || (tmFo && rId && (tmFo.includes(rId) || rId.includes(tmFo)))) return true;
+
+                    // Fallback: Check if rId is ANYWHERE in the raw row array
+                    const cleanCells = tmRow._rawRowArray.map(v => String(v).replace(/[^a-zA-Z0-9]/g, '').replace(/^0+/, ''));
+                    return cleanCells.includes(rId) || cleanCells.some(cell => cell.includes(rId));
+                });
+
+                if (matchedRow) {
+                    // Found the row! Try getting Appt ID from known columns
+                    const rawAppt = (
+                        matchedRow['appointment'] || 
+                        matchedRow['appointmentid'] || 
+                        matchedRow['apptid'] || 
+                        matchedRow['appt'] || 
+                        matchedRow['appointmentnumber'] || 
+                        matchedRow['dockappointment'] || 
+                        matchedRow['appointmentno'] || 
+                        ''
+                    );
+                    
+                    if (rawAppt) {
+                        foundApptId = rawAppt.replace(/,/g, '').replace(/\.0+$/, '').trim();
+                    } 
+                    
+                    // If header match failed, use Brute Force Regex on the row!
+                    if (!foundApptId) {
+                        const fullRowText = matchedRow._rawRowArray.join(' ').replace(/,/g, '');
+                        // Look for 5 to 7 digit numbers
+                        const potentialAppts = fullRowText.match(/\b\d{5,7}\b/g);
+                        if (potentialAppts) {
+                            for (let val of potentialAppts) {
+                                if (val !== rId && !val.startsWith('6100') && !val.startsWith('408')) { // Exclude the FO itself and other FOs
+                                    foundApptId = val;
+                                    break;
+                                }
+                            }
+                        }
+                    }
+
+                    if (foundApptId) break;
+                }
+              }
+
+              if (foundApptId) {
+                updatedCount++;
+                return { ...req, appointmentId: foundApptId, tmSyncError: false, validationError: false };
+              }
+              return req;
+            });
+            
+            if (updatedCount > 0) {
+               setTimeout(() => alert(`Successfully synced and mapped ${updatedCount} request(s) with Appointment IDs!`), 100);
+            } else {
+               setTimeout(() => alert("File parsed, but no matching pending requests were found to update. Ensure SAP headers contain 'Freight Order' and 'Appointment ID', or that the IDs match exactly."), 100);
+            }
+            
+            return nextReqs;
+          });
+          setTmExportError(false);
+        } catch (error) {
+          console.error("Error processing TM Export:", error);
+          alert("Failed to parse TM Export file. Ensure it is a valid CSV or XLSX extract.");
+          setTmExportError(true);
+        }
+      };
+      reader.readAsArrayBuffer(file);
+    } catch (err) {
+      console.error("Failed to load XLSX script", err);
+      alert("Failed to load Excel parsing library. Please check your internet connection.");
+    }
+
+    e.target.value = null; 
+  };
+
+  const handleSlotMatrixUpload = async (e) => {
+      const file = e.target.files[0];
+      if (!file) return;
+
+      try {
+          await injectScript('https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js');
+          const reader = new FileReader();
+          reader.onload = (event) => {
+              try {
+                  const data = new Uint8Array(event.target.result);
+                  const workbook = window.XLSX.read(data, { type: 'array' });
+                  const firstSheetName = workbook.SheetNames[0];
+                  const worksheet = workbook.Sheets[firstSheetName];
+                  
+                  // 1. Read as raw 2D array to bypass macro buttons or metadata at the top of Mike's Macro output
+                  const rawRows = window.XLSX.utils.sheet_to_json(worksheet, { header: 1, defval: "", raw: false });
+                  
+                  // 2. Intelligently scan down to find the actual table headers
+                  let headerRowIdx = 0;
+                  let headers = [];
+                  for (let i = 0; i < Math.min(20, rawRows.length); i++) {
+                      if (!rawRows[i]) continue;
+                      const rowStrings = rawRows[i].map(v => String(v).toLowerCase().replace(/[^a-z0-9]/g, ''));
+                      
+                      // Look for common slot matrix headers expected from the macro
+                      const matchScore = rowStrings.filter(s => s.includes('facility') || s.includes('vendor') || s.includes('freightorder') || s.includes('purchasing') || s.includes('status') || s.includes('date') || s.includes('time') || s.includes('appointment')).length;
+                      
+                      if (matchScore > 1 || (matchScore === 1 && headers.length === 0)) {
+                          headerRowIdx = i;
+                          headers = rawRows[i].map(v => String(v).trim());
+                          if (matchScore > 1) break;
+                      }
+                  }
+
+                  if (headers.length === 0 && rawRows.length > 0) {
+                      headers = rawRows[0].map(v => String(v).trim());
+                  }
+
+                  // 3. Map data cleanly against the true headers
+                  const matrixWithIds = rawRows.slice(headerRowIdx + 1).map((rowArray, i) => {
+                      const rowObj = { id: `slot_${Date.now()}_${i}` };
+                      headers.forEach((h, idx) => {
+                          if (h) rowObj[h] = String(rowArray[idx] || '').trim();
+                      });
+                      return rowObj;
+                  }).filter(row => Object.keys(row).some(k => k !== 'id' && row[k] !== '')); // Remove completely blank rows
+
+                  setSlotMatrix(matrixWithIds);
+              } catch (error) {
+                  console.error(error);
+                  alert("Failed to parse Slot Matrix file.");
+              }
+          };
+          reader.readAsArrayBuffer(file);
+      } catch (err) {
+          console.error(err);
+          alert("Failed to load Excel parsing library.");
+      }
+      e.target.value = null;
+  };
+
+  const handleSlotTMSyncUpload = async (e) => {
+    const file = e.target.files[0];
+    if (!file) return;
+
+    try {
+      await injectScript('https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js');
+
+      const reader = new FileReader();
+      reader.onload = (event) => {
+        try {
+          const data = new Uint8Array(event.target.result);
+          const workbook = window.XLSX.read(data, { type: 'array' });
+          const firstSheetName = workbook.SheetNames[0];
+          const worksheet = workbook.Sheets[firstSheetName];
+          
+          // 1. Read file as raw 2D array, ensuring raw: false to get exact string text
+          const rawRows = window.XLSX.utils.sheet_to_json(worksheet, { header: 1, defval: "", raw: false });
+          
+          // 2. Intelligently scan down to find the actual table headers
+          let headerRowIdx = 0;
+          let headers = [];
+          for (let i = 0; i < Math.min(20, rawRows.length); i++) {
+              if (!rawRows[i]) continue;
+              const rowStrings = rawRows[i].map(v => String(v).toLowerCase().replace(/[^a-z0-9]/g, ''));
+              if (rowStrings.some(s => s.includes('freightorder') || s.includes('shipment') || s.includes('document') || s.includes('torid') || s.includes('appt') || s.includes('appointment'))) {
+                  headerRowIdx = i;
+                  headers = rowStrings;
+                  break;
+              }
+          }
+
+          if (headers.length === 0 && rawRows.length > 0) {
+              headers = rawRows[0].map(v => String(v).toLowerCase().replace(/[^a-z0-9]/g, ''));
+          }
+
+          // 3. Map data cleanly against the true headers
+          const normalizedTMData = rawRows.slice(headerRowIdx + 1).map((rowArray) => {
+              const rowObj = { _rawRowArray: rowArray }; // Keep raw array for brute-force fallback
+              headers.forEach((h, idx) => {
+                  if (h) rowObj[h] = String(rowArray[idx] || '').trim();
+              });
+              return rowObj;
+          });
+
+          setSlotMatrix(prevSlots => {
+            let updatedCount = 0;
+            const nextSlots = prevSlots.map(slot => {
+              let foundApptId = '';
+              
+              // Extract the Freight Order or PO from the slot grid to search for
+              const slotFO = String(slot['Freight Order'] || '').trim().replace(/^0+/, '');
+              const slotPO = String(slot['Purchasing Doc.'] || '').trim().replace(/^0+/, '');
+              const reqIds = [slotFO, slotPO].filter(Boolean);
+
+              if (reqIds.length === 0) return slot;
+
+              for (let rId of reqIds) {
+                // Find row
+                const matchedRow = normalizedTMData.find(tmRow => {
+                    // Check known columns first
+                    const tmFo = (
+                        tmRow['freightorder'] || 
+                        tmRow['freightordernumber'] || 
+                        tmRow['document'] || 
+                        tmRow['documentnumber'] || 
+                        tmRow['shipment'] || 
+                        tmRow['shipmentid'] || 
+                        tmRow['purchasingdocument'] || 
+                        tmRow['torid'] || 
+                        tmRow['id'] || 
+                        ''
+                    ).replace(/^0+/, '');
+                    
+                    if (tmFo === rId || (tmFo && rId && (tmFo.includes(rId) || rId.includes(tmFo)))) return true;
+
+                    // Fallback: Check if rId is ANYWHERE in the raw row array
+                    const cleanCells = tmRow._rawRowArray.map(v => String(v).replace(/[^a-zA-Z0-9]/g, '').replace(/^0+/, ''));
+                    return cleanCells.includes(rId) || cleanCells.some(cell => cell.includes(rId));
+                });
+
+                if (matchedRow) {
+                    // Found the row! Try getting Appt ID from known columns
+                    const rawAppt = (
+                        matchedRow['appointment'] || 
+                        matchedRow['appointmentid'] || 
+                        matchedRow['apptid'] || 
+                        matchedRow['appt'] || 
+                        matchedRow['appointmentnumber'] || 
+                        matchedRow['dockappointment'] || 
+                        matchedRow['appointmentno'] || 
+                        ''
+                    );
+                    
+                    if (rawAppt) {
+                        foundApptId = rawAppt.replace(/,/g, '').replace(/\.0+$/, '').trim();
+                    } 
+                    
+                    // If header match failed, use Brute Force Regex on the row!
+                    if (!foundApptId) {
+                        const fullRowText = matchedRow._rawRowArray.join(' ').replace(/,/g, '');
+                        // Look for 5 to 7 digit numbers (Standard Appt IDs)
+                        const potentialAppts = fullRowText.match(/\b\d{5,7}\b/g);
+                        if (potentialAppts) {
+                            for (let val of potentialAppts) {
+                                // Exclude the FO itself and standard PO starting digits if they matched
+                                if (val !== rId && !val.startsWith('6100') && !val.startsWith('408')) { 
+                                    foundApptId = val;
+                                    break;
+                                }
+                            }
+                        }
+                    }
+
+                    if (foundApptId) break;
+                }
+              }
+
+              if (foundApptId) {
+                updatedCount++;
+                return { ...slot, 'Appointment ID': foundApptId, Status: 'Booked' };
+              }
+              return slot;
+            });
+            
+            if (updatedCount > 0) {
+               setTimeout(() => alert(`Successfully synced and mapped ${updatedCount} slot(s) with Appointment IDs from SAP!`), 100);
+            } else {
+               setTimeout(() => alert("File parsed, but no matching slots were found to update. Ensure the IDs match."), 100);
+            }
+            
+            return nextSlots;
+          });
+        } catch (error) {
+          console.error("Error processing Slot TM Export:", error);
+          alert("Failed to parse TM Export file. Ensure it is a valid extract.");
+        }
+      };
+      reader.readAsArrayBuffer(file);
+    } catch (err) {
+      console.error("Failed to load XLSX script", err);
+      alert("Failed to load Excel parsing library. Please check your internet connection.");
+    }
+
+    e.target.value = null; 
+  };
 
   const removeRequest = (id) => setAllRequests(prev => prev.filter(r => r.id !== id));
 
@@ -499,26 +844,14 @@ export default function App() {
       if (req.customSapTmComment !== undefined) return req.customSapTmComment;
       
       const vendor = (req.vendor || '').toUpperCase();
-      
-      if (req.region === 'DC to DC Transfer') {
-          return `DC TO DC TRANSFER\nORIGIN: ${vendor}\nDEST: ${req.destination}\nTMS SHIP ID: ${req.idValue}`;
-      }
-
       const idValues = (req.idValue || '').split(',').map(s => s.trim()).filter(Boolean);
       const firstIdValue = idValues[0] || '';
-
-      if (req.applianceFirstMile === 'Yes') {
-          const idPrefixText = (req.idType || '').toUpperCase() === 'SHIPMENT ID' ? 'sid' : 'po';
-          const idStr = idValues.length > 1 ? `${idPrefixText} ${firstIdValue} &C` : `${idPrefixText} ${firstIdValue}`;
-          const piecesStr = req.floorLoaded === 'Yes' ? 'FLOOR LOADED' : `${req.skidCount || 0} pcs`;
-          return `${vendor} MDO APPLIANCE DELIVERY\n${idStr}\n${piecesStr}`;
-      }
 
       const idPrefix = req.idType === 'PO' ? 'PO ' : '';
       const loadTypeIndicator = req.loadType === 'Drop Load' ? '-DROP-' : '-LIVE-';
       const boltonCategory = req.region === 'East' && (req.destination || '').includes('7340') ? `-${req.boltonTrailerType === 'Innovation Centre (IC)' ? 'IC' : req.boltonTrailerType === 'Miscellaneous' ? 'MISC' : 'VENDOR'}-` : '';
       const suffix = boltonCategory || loadTypeIndicator;
-      const countLabel = (req.applianceDropOff === 'Yes' || req.applianceFirstMile === 'Yes') ? 'PIECES' : 'SKIDS';
+      const countLabel = req.applianceDropOff === 'Yes' ? 'PIECES' : 'SKIDS';
       const skidsStr = req.floorLoaded === 'Yes' ? 'FLOOR LOADED' : `${req.skidCount || 0} ${countLabel}`;
       return `${vendor}\n${idPrefix}${firstIdValue}\n${skidsStr}${suffix}`.trim();
   };
@@ -593,8 +926,7 @@ export default function App() {
         ...prev, 
         systemTimeWarning: warning || 'None',
         destination: '',
-        ids: prev.ids.map(idObj => ({ ...idObj, date: tDate })),
-        dcTransferData: { ...prev.dcTransferData, preferredDate: tDate }
+        ids: prev.ids.map(idObj => ({ ...idObj, date: tDate }))
       }));
     }
   }, [formData.region]);
@@ -608,144 +940,6 @@ export default function App() {
     if (formErrors[name]) {
       setFormErrors(prev => ({ ...prev, [name]: null }));
     }
-  };
-
-  const handleDcChange = (field, value) => {
-      setFormData(prev => ({
-          ...prev,
-          dcTransferData: {
-              ...prev.dcTransferData,
-              [field]: value
-          }
-      }));
-      if (formErrors[`dc_${field}`]) {
-          setFormErrors(prev => ({ ...prev, [`dc_${field}`]: null }));
-      }
-  };
-
-  const handleDcPaste = (e) => {
-      const clipboardData = e.clipboardData || window.clipboardData;
-      if (!clipboardData) return;
-      const pastedText = clipboardData.getData('text');
-
-      // Determine if this looks like a full grid paste vs a single field paste
-      const isGrid = pastedText.includes('\t') || pastedText.includes('\n') || 
-                     (pastedText.toLowerCase().includes('carrier') && pastedText.toLowerCase().includes('trailer'));
-      if (!isGrid) return; // Let default paste happen normally for single fields
-
-      e.preventDefault();
-
-      const keyMap = {
-          'origin': ['origin'],
-          'destination': ['destination'],
-          'carrier': ['carrier'],
-          'trailer': ['trailer #', 'trailer'],
-          'seal': ['seal #', 'seal'],
-          'weight': ['weight [lbs]', 'weight'],
-          'pallets': ['pallets'],
-          'cartons': ['cartons'],
-          'fb': ['fb #', 'fb'],
-          'fb2': ['fb2 #', 'fb2', 'fb2 ##'],
-          'bol': ['bol #', 'bol'],
-          'bol2': ['bol2 #', 'bol2'],
-          'tu': ['tu #', 'tu'],
-          'tu2': ['tu2 #', 'tu2'],
-          'sapBol': ['sap bol #', 'sap bol'],
-          'cube': ['cube ft3', 'cube'],
-          'scac': ['scac'],
-          'tms': ['tms ship id', 'tms ship id ', 'tms'],
-          'freezable': ['freezable'],
-          'loadOrder': ['load order']
-      };
-
-      // Split the pasted text by tabs or newlines, ignoring pure whitespace blocks
-      const cells = pastedText.split(/[\t\n\r]+/).map(s => s.trim()).filter(Boolean);
-      const extracted = {};
-
-      for (let i = 0; i < cells.length; i++) {
-          const cell = cells[i].toLowerCase();
-          let matchedKey = null;
-          
-          for (const [stateKey, aliases] of Object.entries(keyMap)) {
-              if (aliases.includes(cell)) {
-                  matchedKey = stateKey;
-                  break;
-              }
-          }
-          
-          if (matchedKey && i + 1 < cells.length) {
-              // Ensure the next cell isn't another key (which happens when values are blank)
-              const nextCellLower = cells[i + 1].toLowerCase();
-              const isNextCellAKey = Object.values(keyMap).some(aliases => aliases.includes(nextCellLower));
-              
-              if (!isNextCellAKey) {
-                  extracted[matchedKey] = cells[i + 1];
-                  i++; 
-              } else {
-                  extracted[matchedKey] = ''; 
-              }
-          }
-      }
-
-      setFormData(prev => {
-          const newDcData = { ...prev.dcTransferData };
-          let newOrigin = prev.origin;
-          let newDest = prev.destination;
-          let newCarrier = prev.carrier;
-          let newTrailer = prev.trailer;
-
-          if (extracted.origin !== undefined) newOrigin = extracted.origin;
-          
-          if (extracted.destination !== undefined) {
-              const allDests = [...EAST_DESTINATIONS, ...WEST_DESTINATIONS];
-              const matchedDest = allDests.find(d => d.includes(extracted.destination));
-              if (matchedDest) newDest = matchedDest;
-          }
-
-          if (extracted.carrier !== undefined) newCarrier = extracted.carrier;
-          if (extracted.trailer !== undefined) newTrailer = extracted.trailer;
-
-          if (extracted.seal !== undefined) newDcData.seal = extracted.seal;
-          if (extracted.weight !== undefined) newDcData.weight = extracted.weight;
-          if (extracted.pallets !== undefined) newDcData.pallets = extracted.pallets;
-          if (extracted.cartons !== undefined) newDcData.cartons = extracted.cartons;
-          if (extracted.fb !== undefined) newDcData.fb = extracted.fb;
-          if (extracted.fb2 !== undefined) newDcData.fb2 = extracted.fb2;
-          if (extracted.bol !== undefined) newDcData.bol = extracted.bol;
-          if (extracted.bol2 !== undefined) newDcData.bol2 = extracted.bol2;
-          if (extracted.tu !== undefined) newDcData.tu = extracted.tu;
-          if (extracted.tu2 !== undefined) newDcData.tu2 = extracted.tu2;
-          if (extracted.sapBol !== undefined) newDcData.sapBol = extracted.sapBol;
-          if (extracted.cube !== undefined) newDcData.cube = extracted.cube;
-          if (extracted.scac !== undefined) newDcData.scac = extracted.scac;
-          if (extracted.tms !== undefined) newDcData.tms = extracted.tms;
-          
-          if (extracted.freezable !== undefined) {
-              newDcData.freezable = extracted.freezable.toLowerCase().startsWith('y') ? 'Yes' : 'No';
-          }
-          if (extracted.loadOrder !== undefined) newDcData.loadOrder = extracted.loadOrder;
-
-          return {
-              ...prev,
-              origin: newOrigin,
-              destination: newDest,
-              carrier: newCarrier,
-              trailer: newTrailer,
-              dcTransferData: newDcData
-          };
-      });
-
-      // Automatically clear validation errors for the matched fields
-      setFormErrors(errs => {
-          const newErrs = { ...errs };
-          if (extracted.origin) delete newErrs.origin;
-          if (extracted.destination) delete newErrs.destination;
-          if (extracted.carrier) delete newErrs.carrier;
-          if (extracted.trailer) delete newErrs.trailer;
-          if (extracted.weight) delete newErrs.dc_weight;
-          if (extracted.tms) delete newErrs.dc_tms;
-          return newErrs;
-      });
   };
 
   const handleIdChange = (index, field, val) => {
@@ -837,14 +1031,25 @@ export default function App() {
     }
   };
 
-  const addCCField = () => setFormData(prev => ({ ...prev, carrierCCs: [...prev.carrierCCs, ''] }));
-  const removeCCField = (index) => setFormData(prev => ({ ...prev, carrierCCs: prev.carrierCCs.filter((_, i) => i !== index) }));
+  const addCCField = () => {
+    setFormData(prev => ({ ...prev, carrierCCs: [...prev.carrierCCs, ''] }));
+  };
+
+  const removeCCField = (index) => {
+    setFormData(prev => ({
+      ...prev,
+      carrierCCs: prev.carrierCCs.filter((_, i) => i !== index)
+    }));
+  };
 
   const addIdentifier = (shipmentIndex) => {
     setFormData(prev => {
         const newIds = prev.ids.map((shipment, sIdx) => {
             if (sIdx !== shipmentIndex) return shipment;
-            return { ...shipment, identifiers: [...shipment.identifiers, { type: 'PO', value: '' }] };
+            return {
+                ...shipment,
+                identifiers: [...shipment.identifiers, { type: 'PO', value: '' }]
+            };
         });
         return { ...prev, ids: newIds };
     });
@@ -856,7 +1061,10 @@ export default function App() {
             if (sIdx !== shipmentIndex) return shipment;
             const newIdentifiers = [...shipment.identifiers];
             newIdentifiers.splice(identIndex, 1);
-            return { ...shipment, identifiers: newIdentifiers };
+            return {
+                ...shipment,
+                identifiers: newIdentifiers
+            };
         });
         return { ...prev, ids: newIds };
     });
@@ -912,121 +1120,90 @@ export default function App() {
     let errors = {};
     if (!formData.region) errors.region = "Please select a region.";
     if (!formData.destination) errors.destination = "Please select a destination.";
+    
+    const needsApplianceSelection = formData.destination.includes('DFC') || formData.destination.includes('MDO');
+    if (needsApplianceSelection && (!formData.applianceDropOff || formData.applianceDropOff === 'N/A')) {
+      errors.applianceDropOff = "Please specify if this is an appliance drop off.";
+    }
 
-    if (formData.region === 'DC to DC Transfer') {
-        if (!formData.origin) errors.origin = "Origin facility is required.";
-        if (!formData.carrier) errors.carrier = "Carrier Name is required in the grid.";
-        if (!formData.trailer) errors.trailer = "Trailer # is required in the grid.";
-        if (!formData.dcTransferData.weight) errors.dc_weight = "Weight is required.";
-        if (!formData.dcTransferData.tms) errors.dc_tms = "TMS Ship ID is required.";
-        if (!formData.dcTransferData.preferredDate) {
-            errors.dc_preferredDate = "Preferred Date is required.";
-        } else {
-            const dcDateErr = checkDateError(formData.dcTransferData.preferredDate, formData.region, formData.destination, formData.loadType);
-            if (dcDateErr) errors.dc_preferredDate = dcDateErr;
+    if (!formData.loadType) errors.loadType = "Please select a load type.";
+    
+    const hasSkidLimit = formData.destination.includes('7275') || formData.destination.includes('7410');
+    
+    if (formData.loadType === 'Live Load' && hasSkidLimit && !formData.liveLoadAcknowledged && formData.applianceDropOff !== 'Yes' && formData.floorLoaded !== 'Yes') {
+      errors.liveLoadAcknowledged = "You must acknowledge the skid limit for Live Loads at this facility.";
+    }
+
+    if (formData.region === 'East' && formData.destination.includes('7340')) {
+      if (!formData.boltonTrailerType) {
+        errors.boltonTrailerType = "Please select a Bolton load category.";
+      }
+    }
+
+    const is247DropFacility = (formData.destination.includes('7275') || formData.destination.includes('7340') || formData.destination.includes('7410') || formData.destination.includes('7279') || formData.destination.includes('7347')) && 
+                              formData.loadType === 'Drop Load';
+
+    let totalSkids = 0;
+
+    formData.ids.forEach((idObj, index) => {
+      idObj.identifiers.forEach((ident, identIdx) => {
+        if (ident.type === 'Shipment ID' && !/^6100\d{6}$/.test(ident.value) && ident.value !== '99999') {
+          errors[`id_${index}_ident_${identIdx}_value`] = `Shipment ID #${identIdx + 1} must be exactly 10 digits and start with '6100', or be '99999'.`;
+        } else if (ident.type === 'PO' && !/^([348]\d{7}|5\d{8})$/.test(ident.value) && ident.value !== '99999') {
+          errors[`id_${index}_ident_${identIdx}_value`] = `PO #${identIdx + 1} must be 8 digits (starts with 3,4,8) OR 9 digits (starts with 5), or be '99999'.`;
+        } else if (!ident.value) {
+          errors[`id_${index}_ident_${identIdx}_value`] = `ID/PO value is required.`;
         }
+      });
 
-        if (!formData.hasBol) errors.hasBol = "Please specify if you have a BOL.";
-        if (formData.hasBol === 'Yes' && formData.bolFiles.length === 0) {
-            errors.bolFiles = "Please upload at least one BOL PDF file.";
+      if (!idObj.date) {
+        errors[`id_${index}_date`] = `Date is required for Shipment #${index + 1}.`;
+      } else {
+        const dateErr = checkDateError(idObj.date, formData.region, formData.destination, formData.loadType);
+        if (dateErr) {
+          errors[`id_${index}_date`] = dateErr;
         }
+      }
 
-        if (!formData.hasObtr) errors.hasObtr = "Please specify if you have an OBTR.";
-        if (formData.hasObtr === 'Yes' && formData.obtrFiles.length === 0) {
-            errors.obtrFiles = "Please upload the OBTR PDF template.";
-        }
-    } else {
-        // Standard Validation
-        const needsApplianceSelection = formData.destination.includes('DFC') || formData.destination.includes('MDO');
-        if (needsApplianceSelection && (!formData.applianceDropOff || formData.applianceDropOff === 'N/A')) {
-          errors.applianceDropOff = "Please specify if this is an appliance drop off.";
-        }
-
-        const isEastFirstMile = formData.region === 'East' && (formData.destination.includes('7340') || formData.destination.includes('7403') || formData.destination.includes('7364'));
-        const isWestFirstMile = formData.region === 'West' && (formData.destination.includes('7347') || formData.destination.includes('7403') || formData.destination.includes('7364'));
-        if ((isEastFirstMile || isWestFirstMile) && (!formData.applianceFirstMile || formData.applianceFirstMile === 'N/A')) {
-          errors.applianceFirstMile = "Please specify if this is an Appliance First Mile drop off.";
-        }
-
-        if (!formData.loadType) errors.loadType = "Please select a load type.";
-        
-        const hasSkidLimit = formData.destination.includes('7275') || formData.destination.includes('7410');
-        
-        if (formData.loadType === 'Live Load' && hasSkidLimit && !formData.liveLoadAcknowledged && formData.applianceDropOff !== 'Yes' && formData.floorLoaded !== 'Yes') {
-          errors.liveLoadAcknowledged = "You must acknowledge the skid limit for Live Loads at this facility.";
-        }
-
-        if (formData.region === 'East' && formData.destination.includes('7340')) {
-          if (!formData.boltonTrailerType) {
-            errors.boltonTrailerType = "Please select a Bolton load category.";
-          }
-        }
-
-        const is247DropFacility = (formData.destination.includes('7275') || formData.destination.includes('7340') || formData.destination.includes('7410') || formData.destination.includes('7279') || formData.destination.includes('7347')) && 
-                                  formData.loadType === 'Drop Load';
-
-        let totalSkids = 0;
-
-        formData.ids.forEach((idObj, index) => {
-          idObj.identifiers.forEach((ident, identIdx) => {
-            if (ident.type === 'Shipment ID' && !/^6100\d{6}$/.test(ident.value) && ident.value !== '99999') {
-              errors[`id_${index}_ident_${identIdx}_value`] = `Shipment ID #${identIdx + 1} must be exactly 10 digits and start with '6100', or be '99999'.`;
-            } else if (ident.type === 'PO' && !/^([348]\d{7}|5\d{8})$/.test(ident.value) && ident.value !== '99999') {
-              errors[`id_${index}_ident_${identIdx}_value`] = `PO #${identIdx + 1} must be 8 digits (starts with 3,4,8) OR 9 digits (starts with 5), or be '99999'.`;
-            } else if (!ident.value) {
-              errors[`id_${index}_ident_${identIdx}_value`] = `ID/PO value is required.`;
-            }
-          });
-
-          if (!idObj.date) {
-            errors[`id_${index}_date`] = `Date is required for Shipment #${index + 1}.`;
+      if (!is247DropFacility) {
+          if (!idObj.timeSlot) {
+            errors[`id_${index}_timeSlot`] = `Time slot is required for Shipment #${index + 1}.`;
           } else {
-            const dateErr = checkDateError(idObj.date, formData.region, formData.destination, formData.loadType);
-            if (dateErr) {
-              errors[`id_${index}_date`] = dateErr;
+            const timeErr = checkTimeSlotError(idObj.date, idObj.timeSlot, formData.region, is247DropFacility);
+            if (timeErr) {
+              errors[`id_${index}_timeSlot`] = timeErr;
             }
           }
-
-          if (!is247DropFacility) {
-              if (!idObj.timeSlot) {
-                errors[`id_${index}_timeSlot`] = `Time slot is required for Shipment #${index + 1}.`;
-              } else {
-                const timeErr = checkTimeSlotError(idObj.date, idObj.timeSlot, formData.region, is247DropFacility);
-                if (timeErr) {
-                  errors[`id_${index}_timeSlot`] = timeErr;
-                }
-              }
-          }
-          
-          if (formData.floorLoaded !== 'Yes') {
-            const skidNum = parseInt(idObj.skidCount, 10);
-            if (isNaN(skidNum) || skidNum <= 0 || skidNum >= 999) {
-              const countLabel = (formData.applianceDropOff === 'Yes' || formData.applianceFirstMile === 'Yes') ? 'Pieces' : 'SKID';
-              errors[`id_${index}_skidCount`] = `Valid ${countLabel} count required for Shipment #${index + 1}.`;
-            } else {
-              totalSkids += skidNum;
-              if (formData.loadType === 'Live Load' && hasSkidLimit && skidNum > 15 && formData.applianceDropOff !== 'Yes') {
-                errors[`id_${index}_skidCount`] = `Live loads cannot exceed 15 skids per shipment at this facility.`;
-              }
-            }
-          }
-        });
-
-        if (formData.floorLoaded !== 'Yes') {
-          const maxAllowedSkids = 15 * formData.ids.length;
-          if (formData.loadType === 'Live Load' && hasSkidLimit && totalSkids > maxAllowedSkids && formData.applianceDropOff !== 'Yes') {
-            errors.loadType = `If you selected more than 15 skids per shipment (total > ${maxAllowedSkids}), it will automatically be converted into a drop load. Please change to Drop Load.`;
+      }
+      
+      if (formData.floorLoaded !== 'Yes') {
+        const skidNum = parseInt(idObj.skidCount, 10);
+        if (isNaN(skidNum) || skidNum <= 0 || skidNum >= 999) {
+          const countLabel = formData.applianceDropOff === 'Yes' ? 'Pieces' : 'SKID';
+          errors[`id_${index}_skidCount`] = `Valid ${countLabel} count required for Shipment #${index + 1}.`;
+        } else {
+          totalSkids += skidNum;
+          if (formData.loadType === 'Live Load' && hasSkidLimit && skidNum > 15 && formData.applianceDropOff !== 'Yes') {
+            errors[`id_${index}_skidCount`] = `Live loads cannot exceed 15 skids per shipment at this facility.`;
           }
         }
+      }
+    });
 
-        if (!formData.vendor) errors.vendor = "Vendor/Shipper name is required.";
-        if (!formData.trailer) errors.trailer = "Trailer Number is required.";
-        if (!formData.carrier) errors.carrier = "Carrier name is required.";
-        
-        if (!formData.hasBol) errors.hasBol = "Please specify if you have a BOL.";
-        if (formData.hasBol === 'Yes' && formData.bolFiles.length === 0) {
-          errors.bolFiles = "Please upload at least one BOL PDF file.";
-        }
+    if (formData.floorLoaded !== 'Yes') {
+      const maxAllowedSkids = 15 * formData.ids.length;
+      if (formData.loadType === 'Live Load' && hasSkidLimit && totalSkids > maxAllowedSkids && formData.applianceDropOff !== 'Yes') {
+        errors.loadType = `If you selected more than 15 skids per shipment (total > ${maxAllowedSkids}), it will automatically be converted into a drop load. Please change to Drop Load.`;
+      }
+    }
+
+    if (!formData.vendor) errors.vendor = "Vendor/Shipper name is required.";
+    if (!formData.trailer) errors.trailer = "Trailer Number is required.";
+    if (!formData.carrier) errors.carrier = "Carrier name is required.";
+    
+    if (!formData.hasBol) errors.hasBol = "Please specify if you have a BOL.";
+    if (formData.hasBol === 'Yes' && formData.bolFiles.length === 0) {
+      errors.bolFiles = "Please upload at least one BOL PDF file.";
     }
 
     if (!formData.carrierEmail || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(formData.carrierEmail)) {
@@ -1071,77 +1248,41 @@ export default function App() {
                               exportData.loadType === 'Drop Load';
 
     const bolNames = exportData.bolFiles.map(f => f.name).join('; ');
-    const obtrNames = exportData.obtrFiles?.map(f => f.name).join('; ') || 'N/A';
     
     const rows = [
       ["Field", "Value"],
       ["Appointment Needed", exportData.needsAppointment || ''],
       ["Region", exportData.region || ''],
       ["Destination", exportData.destination || ''],
-    ];
-
-    if (exportData.region === 'DC to DC Transfer') {
-        rows.push(
-          ["Origin", exportData.origin || ''],
-          ["Carrier", exportData.carrier || ''],
-          ["Trailer #", exportData.trailer || ''],
-          ["Seal #", exportData.dcTransferData.seal || ''],
-          ["Weight [lbs]", exportData.dcTransferData.weight || ''],
-          ["Pallets", exportData.dcTransferData.pallets || ''],
-          ["Cartons", exportData.dcTransferData.cartons || ''],
-          ["FB #", exportData.dcTransferData.fb || ''],
-          ["FB2 #", exportData.dcTransferData.fb2 || ''],
-          ["BOL #", exportData.dcTransferData.bol || ''],
-          ["BOL2 #", exportData.dcTransferData.bol2 || ''],
-          ["TU #", exportData.dcTransferData.tu || ''],
-          ["TU2 #", exportData.dcTransferData.tu2 || ''],
-          ["SAP BOL #", exportData.dcTransferData.sapBol || ''],
-          ["Cube Ft3", exportData.dcTransferData.cube || ''],
-          ["SCAC", exportData.dcTransferData.scac || ''],
-          ["TMS Ship ID", exportData.dcTransferData.tms || ''],
-          ["Freezable", exportData.dcTransferData.freezable || 'No'],
-          ["Load Order", exportData.dcTransferData.loadOrder || ''],
-          ["Preferred Date", exportData.dcTransferData.preferredDate || ''],
-          ["Comments", exportData.dcTransferData.comments || ''],
-          ["Has OBTR", exportData.hasObtr || ''],
-          ["OBTR File", obtrNames]
-        );
-    } else {
-        rows.push(
-          ["Appliance Drop Off", exportData.applianceDropOff || ''],
-          ["Appliance First Mile", exportData.applianceFirstMile || ''],
-          ["Load Type", exportData.loadType || ''],
-          ["Floor Loaded", exportData.floorLoaded || 'No'],
-          ["Bolton Load Category", exportData.boltonTrailerType || 'N/A'],
-          ["Live Load Acknowledged", exportData.liveLoadAcknowledged ? 'Yes' : 'N/A'],
-          ["Vendor/Shipper", exportData.vendor || ''],
-          ["Carrier", exportData.carrier || ''],
-          ["Trailer Number", exportData.trailer || '']
-        );
-
-        exportData.ids.forEach((idObj, index) => {
-          const n = index + 1;
-          const combinedValues = idObj.identifiers.map(i => i.value).join(', ');
-          const identStrings = idObj.identifiers.map(i => `${i.type}: ${i.value}`).join(' | ');
-
-          rows.push([`ID ${n} - Type`, idObj.identifiers[0]?.type || '']);
-          rows.push([`ID ${n} - Value`, combinedValues]);
-          rows.push([`ID ${n} - Identifiers Detailed`, identStrings]);
-          rows.push([`ID ${n} - Date`, idObj.date || '']);
-          rows.push([`ID ${n} - Time Slot`, is247DropFacility ? '24/7 Drop' : (idObj.timeSlot || '')]);
-          const countLabel = (exportData.applianceDropOff === 'Yes' || exportData.applianceFirstMile === 'Yes') ? 'Pieces Count' : 'Skid Count';
-          rows.push([`ID ${n} - ${countLabel}`, exportData.floorLoaded === 'Yes' ? 'Floor Loaded' : (idObj.skidCount || '')]);
-          rows.push([`ID ${n} - Comments`, idObj.comments || '']);
-        });
-    }
-
-    rows.push(
+      ["Appliance Drop Off", exportData.applianceDropOff || ''],
+      ["Load Type", exportData.loadType || ''],
+      ["Floor Loaded", exportData.floorLoaded || 'No'],
+      ["Bolton Load Category", exportData.boltonTrailerType || 'N/A'],
+      ["Live Load Acknowledged", exportData.liveLoadAcknowledged ? 'Yes' : 'N/A'],
       ["Has BOL", exportData.hasBol || ''],
       ["BOL File", bolNames || 'N/A'],
+      ["Vendor/Shipper", exportData.vendor || ''],
+      ["Carrier", exportData.carrier || ''],
       ["Carrier Email", exportData.carrierEmail || ''],
       ["Carrier CC", (exportData.carrierCCs || []).filter(c => c.trim()).join(', ')],
+      ["Trailer Number", exportData.trailer || ''],
       ["System Notice (Cutoff)", exportData.systemTimeWarning !== 'None' ? exportData.systemTimeWarning : 'None']
-    );
+    ];
+
+    exportData.ids.forEach((idObj, index) => {
+      const n = index + 1;
+      const combinedValues = idObj.identifiers.map(i => i.value).join(', ');
+      const identStrings = idObj.identifiers.map(i => `${i.type}: ${i.value}`).join(' | ');
+
+      rows.push([`ID ${n} - Type`, idObj.identifiers[0]?.type || '']);
+      rows.push([`ID ${n} - Value`, combinedValues]);
+      rows.push([`ID ${n} - Identifiers Detailed`, identStrings]);
+      rows.push([`ID ${n} - Date`, idObj.date || '']);
+      rows.push([`ID ${n} - Time Slot`, is247DropFacility ? '24/7 Drop' : (idObj.timeSlot || '')]);
+      const countLabel = exportData.applianceDropOff === 'Yes' ? 'Pieces Count' : 'Skid Count';
+      rows.push([`ID ${n} - ${countLabel}`, exportData.floorLoaded === 'Yes' ? 'Floor Loaded' : (idObj.skidCount || '')]);
+      rows.push([`ID ${n} - Comments`, idObj.comments || '']);
+    });
 
     return rows.map(e => e.map(item => `"${(item||'').toString().replace(/"/g, '""')}"`).join(",")).join("\r\n");
   };
@@ -1153,72 +1294,37 @@ export default function App() {
     let firstId = '';
     let subject = '';
 
-    if (formData.region === 'DC to DC Transfer') {
-        firstId = formData.dcTransferData.tms;
-        subject = `DC Transfer Request - TMS ${firstId} - ${formData.destination}`;
-    } else {
-        firstId = formData.ids[0]?.identifiers[0]?.value || '';
-        const titleSuffix = formData.ids.length > 1 || formData.ids[0]?.identifiers.length > 1 ? ' & others' : '';
-        subject = `Load Booking Request - ${firstId}${titleSuffix} - ${formData.destination}`;
-    }
+    firstId = formData.ids[0]?.identifiers[0]?.value || '';
+    const titleSuffix = formData.ids.length > 1 || formData.ids[0]?.identifiers.length > 1 ? ' & others' : '';
+    subject = `Load Booking Request - ${firstId}${titleSuffix} - ${formData.destination}`;
     
     // --- PLAIN TEXT BODY ---
     let bodyText = `Please find the load booking details below:\r\n\r\n`;
     bodyText += `Region: ${formData.region || ''}\r\n`;
     bodyText += `Destination: ${formData.destination || ''}\r\n`;
-
-    if (formData.region === 'DC to DC Transfer') {
-        bodyText += `Origin: ${formData.origin || ''}\r\n`;
-        bodyText += `Carrier: ${formData.carrier || ''}\r\n`;
-        bodyText += `Trailer #: ${formData.trailer || ''}\r\n`;
-        bodyText += `Seal #: ${formData.dcTransferData.seal || ''}\r\n`;
-        bodyText += `Weight [lbs]: ${formData.dcTransferData.weight || ''}\r\n`;
-        bodyText += `Pallets: ${formData.dcTransferData.pallets || ''}\r\n`;
-        bodyText += `Cartons: ${formData.dcTransferData.cartons || ''}\r\n`;
-        bodyText += `FB #: ${formData.dcTransferData.fb || ''}\r\n`;
-        bodyText += `FB2 #: ${formData.dcTransferData.fb2 || ''}\r\n`;
-        bodyText += `BOL #: ${formData.dcTransferData.bol || ''}\r\n`;
-        bodyText += `BOL2 #: ${formData.dcTransferData.bol2 || ''}\r\n`;
-        bodyText += `TU #: ${formData.dcTransferData.tu || ''}\r\n`;
-        bodyText += `TU2 #: ${formData.dcTransferData.tu2 || ''}\r\n`;
-        bodyText += `SAP BOL #: ${formData.dcTransferData.sapBol || ''}\r\n`;
-        bodyText += `Cube Ft3: ${formData.dcTransferData.cube || ''}\r\n`;
-        bodyText += `SCAC: ${formData.dcTransferData.scac || ''}\r\n`;
-        bodyText += `TMS Ship ID: ${formData.dcTransferData.tms || ''}\r\n`;
-        bodyText += `Freezable: ${formData.dcTransferData.freezable || ''}\r\n`;
-        bodyText += `Load Order: ${formData.dcTransferData.loadOrder || ''}\r\n`;
-        bodyText += `Preferred Date: ${formData.dcTransferData.preferredDate || ''}\r\n`;
-        if (formData.dcTransferData.comments) bodyText += `Comments: ${formData.dcTransferData.comments}\r\n`;
-    } else {
-        if (formData.applianceDropOff && formData.applianceDropOff !== 'N/A') bodyText += `Appliance Drop Off: ${formData.applianceDropOff}\r\n`;
-        if (formData.applianceFirstMile && formData.applianceFirstMile !== 'N/A') bodyText += `Appliance First Mile: ${formData.applianceFirstMile}\r\n`;
-        bodyText += `Load Type: ${formData.loadType || ''}\r\n`;
-        bodyText += `Floor Loaded: ${formData.floorLoaded || 'No'}\r\n`;
-        if (formData.region === 'East' && formData.destination.includes('7340')) {
-            bodyText += `Bolton Category: ${formData.boltonTrailerType || ''}\r\n`;
-        }
-        bodyText += `Vendor/Shipper: ${formData.vendor || ''}\r\n`;
-        bodyText += `Carrier: ${formData.carrier || ''}\r\n`;
-        bodyText += `Trailer Number: ${formData.trailer || ''}\r\n\r\n`;
-
-        bodyText += `--- Shipments / POs ---\r\n`;
-        formData.ids.forEach((idObj, index) => {
-          const identStrings = idObj.identifiers.map(i => `${i.type}: ${i.value}`).join(', ');
-          const countStr = (formData.applianceDropOff === 'Yes' || formData.applianceFirstMile === 'Yes') ? 'Pieces' : 'SKIDs';
-          bodyText += `\r\n[#${index + 1}] Identifiers: ${identStrings}\r\n`;
-          bodyText += `Date: ${idObj.date} | Preferred Time: ${is247DropFacility ? '24/7 Drop' : idObj.timeSlot} | ${countStr}: ${formData.floorLoaded === 'Yes' ? 'Floor Loaded' : idObj.skidCount}\r\n`;
-          if (idObj.comments) bodyText += `Comments: ${idObj.comments}\r\n`;
-        });
-        bodyText += `\r\n-----------------------\r\n`;
+    if (formData.applianceDropOff && formData.applianceDropOff !== 'N/A') bodyText += `Appliance Drop Off: ${formData.applianceDropOff}\r\n`;
+    bodyText += `Load Type: ${formData.loadType || ''}\r\n`;
+    bodyText += `Floor Loaded: ${formData.floorLoaded || 'No'}\r\n`;
+    if (formData.region === 'East' && formData.destination.includes('7340')) {
+        bodyText += `Bolton Category: ${formData.boltonTrailerType || ''}\r\n`;
     }
+    bodyText += `Vendor/Shipper: ${formData.vendor || ''}\r\n`;
+    bodyText += `Carrier: ${formData.carrier || ''}\r\n`;
+    bodyText += `Trailer Number: ${formData.trailer || ''}\r\n\r\n`;
+
+    bodyText += `--- Shipments / POs ---\r\n`;
+    formData.ids.forEach((idObj, index) => {
+      const identStrings = idObj.identifiers.map(i => `${i.type}: ${i.value}`).join(', ');
+      const countStr = formData.applianceDropOff === 'Yes' ? 'Pieces' : 'SKIDs';
+      bodyText += `\r\n[#${index + 1}] Identifiers: ${identStrings}\r\n`;
+      bodyText += `Date: ${idObj.date} | Preferred Time: ${is247DropFacility ? '24/7 Drop' : idObj.timeSlot} | ${countStr}: ${formData.floorLoaded === 'Yes' ? 'Floor Loaded' : idObj.skidCount}\r\n`;
+      if (idObj.comments) bodyText += `Comments: ${idObj.comments}\r\n`;
+    });
+    bodyText += `\r\n-----------------------\r\n`;
     
     const bolNames = formData.bolFiles.map(f => f.name).join(', ');
-    const obtrNames = formData.obtrFiles?.map(f => f.name).join(', ');
     
     bodyText += `Has BOL: ${formData.hasBol || ''} ${formData.bolFiles.length > 0 ? `(${bolNames})` : ''}\r\n`;
-    if (formData.region === 'DC to DC Transfer') {
-        bodyText += `Has OBTR: ${formData.hasObtr || ''} ${formData.obtrFiles?.length > 0 ? `(${obtrNames})` : ''}\r\n`;
-    }
 
     const validCCs = (formData.carrierCCs || []).filter(c => c.trim()).join(', ');
     bodyText += `Carrier Email: ${formData.carrierEmail || ''}\r\n`;
@@ -1250,58 +1356,30 @@ export default function App() {
     addRow("Region", formData.region);
     addRow("Destination", formData.destination);
 
-    if (formData.region === 'DC to DC Transfer') {
-        addRow("Origin", formData.origin);
-        addRow("Carrier", formData.carrier);
-        addRow("Trailer #", formData.trailer);
-        addRow("Seal #", formData.dcTransferData.seal);
-        addRow("Weight [lbs]", formData.dcTransferData.weight);
-        addRow("Pallets", formData.dcTransferData.pallets);
-        addRow("Cartons", formData.dcTransferData.cartons);
-        addRow("FB #", formData.dcTransferData.fb);
-        addRow("FB2 #", formData.dcTransferData.fb2);
-        addRow("BOL #", formData.dcTransferData.bol);
-        addRow("BOL2 #", formData.dcTransferData.bol2);
-        addRow("TU #", formData.dcTransferData.tu);
-        addRow("TU2 #", formData.dcTransferData.tu2);
-        addRow("SAP BOL #", formData.dcTransferData.sapBol);
-        addRow("Cube Ft3", formData.dcTransferData.cube);
-        addRow("SCAC", formData.dcTransferData.scac);
-        addRow("TMS Ship ID", formData.dcTransferData.tms);
-        addRow("Freezable", formData.dcTransferData.freezable);
-        addRow("Load Order", formData.dcTransferData.loadOrder);
-        addRow("Preferred Date", formData.dcTransferData.preferredDate);
-        addRow("Comments", formData.dcTransferData.comments);
-    } else {
-        if (formData.applianceDropOff && formData.applianceDropOff !== 'N/A') addRow("Appliance Drop Off", formData.applianceDropOff);
-        if (formData.applianceFirstMile && formData.applianceFirstMile !== 'N/A') addRow("Appliance First Mile", formData.applianceFirstMile);
-        addRow("Load Type", formData.loadType);
-        addRow("Floor Loaded", formData.floorLoaded);
-        if (formData.region === 'East' && formData.destination.includes('7340')) addRow("Bolton Load Category", formData.boltonTrailerType);
-        addRow("Vendor/Shipper", formData.vendor);
-        addRow("Carrier", formData.carrier);
-        addRow("Trailer Number", formData.trailer);
+    if (formData.applianceDropOff && formData.applianceDropOff !== 'N/A') addRow("Appliance Drop Off", formData.applianceDropOff);
+    addRow("Load Type", formData.loadType);
+    addRow("Floor Loaded", formData.floorLoaded);
+    if (formData.region === 'East' && formData.destination.includes('7340')) addRow("Bolton Load Category", formData.boltonTrailerType);
+    addRow("Vendor/Shipper", formData.vendor);
+    addRow("Carrier", formData.carrier);
+    addRow("Trailer Number", formData.trailer);
 
-        formData.ids.forEach((idObj, i) => {
-           htmlBody += `
-            <tr>
-              <td colspan="2" style="padding: 8px 12px; border: 1px solid #b8d4f0; background-color: #cce0f5; font-weight: bold; text-align: center;">--- Shipment / PO #${i + 1} ---</td>
-            </tr>
-           `;
-           const identStrings = idObj.identifiers.map(id => `${id.type}: ${id.value}`).join(' | ');
-           addRow("Identifiers Detailed", identStrings);
-           addRow("Date", idObj.date);
-           addRow("Time Slot", is247DropFacility ? '24/7 Drop' : idObj.timeSlot);
-           const countLabel = (formData.applianceDropOff === 'Yes' || formData.applianceFirstMile === 'Yes') ? 'Pieces Count' : 'Skid Count';
-           addRow(countLabel, formData.floorLoaded === 'Yes' ? 'Floor Loaded' : idObj.skidCount);
-           addRow("Comments", idObj.comments);
-        });
-    }
+    formData.ids.forEach((idObj, i) => {
+       htmlBody += `
+        <tr>
+          <td colspan="2" style="padding: 8px 12px; border: 1px solid #b8d4f0; background-color: #cce0f5; font-weight: bold; text-align: center;">--- Shipment / PO #${i + 1} ---</td>
+        </tr>
+       `;
+       const identStrings = idObj.identifiers.map(id => `${id.type}: ${id.value}`).join(' | ');
+       addRow("Identifiers Detailed", identStrings);
+       addRow("Date", idObj.date);
+       addRow("Time Slot", is247DropFacility ? '24/7 Drop' : idObj.timeSlot);
+       const countLabel = formData.applianceDropOff === 'Yes' ? 'Pieces Count' : 'Skid Count';
+       addRow(countLabel, formData.floorLoaded === 'Yes' ? 'Floor Loaded' : idObj.skidCount);
+       addRow("Comments", idObj.comments);
+    });
 
     addRow("Has BOL", `${formData.hasBol} ${formData.bolFiles.length > 0 ? `(${bolNames})` : ''}`);
-    if (formData.region === 'DC to DC Transfer') {
-        addRow("Has OBTR", `${formData.hasObtr} ${formData.obtrFiles?.length > 0 ? `(${obtrNames})` : ''}`);
-    }
     addRow("Carrier Email", formData.carrierEmail);
     if (validCCs) addRow("Carrier CC", validCCs);
 
@@ -1350,17 +1428,6 @@ export default function App() {
     ];
 
     formData.bolFiles.forEach(fileObj => {
-      emlContent.push(
-        `--${boundaryMixed}`,
-        `Content-Type: application/pdf; name="${fileObj.name}"`,
-        `Content-Disposition: attachment; filename="${fileObj.name}"`,
-        `Content-Transfer-Encoding: base64`,
-        ``,
-        fileObj.data
-      );
-    });
-
-    formData.obtrFiles?.forEach(fileObj => {
       emlContent.push(
         `--${boundaryMixed}`,
         `Content-Type: application/pdf; name="${fileObj.name}"`,
@@ -1444,127 +1511,93 @@ export default function App() {
     const requests = [];
     let i = 1;
     
-    // Check if it's a DC Transfer
-    if (extractedData["Region"] === "DC to DC Transfer") {
-        const req = { 
-            id: fileName + Date.now().toString(), 
-            sourceFile: fileName,
-            originalSubject: originalSubject,
-            originalMessageId: originalMessageId,
-            timestamp: emailDate.toISOString(),
-            displayTime: emailDate.toLocaleString(),
-            status: 'Requested',
-            region: extractedData["Region"],
-            destination: extractedData["Destination"],
-            vendor: extractedData["Origin"], // Map Origin to Vendor column for table
-            carrier: extractedData["Carrier"],
-            carrierEmail: extractedData["Carrier Email"],
-            carrierEmailCC: extractedData["Carrier CC"],
-            trailer: extractedData["Trailer #"],
-            idType: 'TMS',
-            idValue: extractedData["TMS Ship ID"] || extractedData["FB #"],
-            appointmentDate: formatTmDate(extractedData["Preferred Date"]),
-            timeSlot1: 'Drop', // DC usually drop, or n/a
-            skidCount: extractedData["Weight [lbs]"] || extractedData["Pallets"],
-            comments: extractedData["Comments"] || '',
-            confirmedDate: formatTmDate(extractedData["Preferred Date"]) || '',
-            confirmedTimeSlot: '',
-            appointmentId: '',
-            loadType: 'Drop Load',
-            exceptionFlag: false
-        };
-        requests.push(req);
-    } else {
-        // Standard Vendor Parsing
-        while (extractedData[`ID ${i} - Value`]) {
-          const req = { 
-            id: fileName + Date.now().toString() + "_" + i, 
-            sourceFile: fileName,
-            originalSubject: originalSubject,
-            originalMessageId: originalMessageId,
-            timestamp: emailDate.toISOString(),
-            displayTime: emailDate.toLocaleString(),
-            status: 'Requested',
-            region: extractedData["Region"],
-            destination: extractedData["Destination"],
-            applianceDropOff: extractedData["Appliance Drop Off"],
-            applianceFirstMile: extractedData["Appliance First Mile"],
-            loadType: extractedData["Load Type"],
-            floorLoaded: extractedData["Floor Loaded"] || 'No',
-            boltonTrailerType: extractedData["Bolton Load Category"] || '',
-            hasBol: extractedData["Has BOL"],
-            bolFile: extractedData["BOL File"],
-            vendor: extractedData["Vendor/Shipper"],
-            carrier: extractedData["Carrier"],
-            carrierEmail: extractedData["Carrier Email"],
-            carrierEmailCC: extractedData["Carrier CC"],
-            trailer: extractedData["Trailer Number"],
-            idType: extractedData[`ID ${i} - Type`],
-            idValue: extractedData[`ID ${i} - Value`],
-            appointmentDate: formatTmDate(extractedData[`ID ${i} - Date`]),
-            timeSlot1: formatTmTime(extractedData[`ID ${i} - Time Slot`]),
-            skidCount: extractedData[`ID ${i} - Skid Count`] || extractedData[`ID ${i} - Pieces Count`],
-            comments: extractedData[`ID ${i} - Comments`],
-            confirmedDate: formatTmDate(extractedData[`ID ${i} - Date`]) || '',
-            confirmedTimeSlot: formatTmTime(extractedData[`ID ${i} - Time Slot`]) || '',
-            appointmentId: '',
-            exceptionFlag: false
-          };
-          
-          const destStr = req.destination || '';
-          const hasSkidLimit = destStr.includes('7275') || destStr.includes('7410');
-          
-          if (req.loadType === 'Live Load' && hasSkidLimit && parseInt(req.skidCount, 10) > 15 && req.applianceDropOff !== 'Yes' && !String(req.skidCount).toLowerCase().includes('floor')) {
-            req.exceptionFlag = true;
-          }
+    // Standard Vendor Parsing
+    while (extractedData[`ID ${i} - Value`]) {
+      const req = { 
+        id: fileName + Date.now().toString() + "_" + i, 
+        sourceFile: fileName,
+        originalSubject: originalSubject,
+        originalMessageId: originalMessageId,
+        timestamp: emailDate.toISOString(),
+        displayTime: emailDate.toLocaleString(),
+        status: 'Requested',
+        region: extractedData["Region"],
+        destination: extractedData["Destination"],
+        applianceDropOff: extractedData["Appliance Drop Off"],
+        loadType: extractedData["Load Type"],
+        floorLoaded: extractedData["Floor Loaded"] || 'No',
+        boltonTrailerType: extractedData["Bolton Load Category"] || '',
+        hasBol: extractedData["Has BOL"],
+        bolFile: extractedData["BOL File"],
+        vendor: extractedData["Vendor/Shipper"],
+        carrier: extractedData["Carrier"],
+        carrierEmail: extractedData["Carrier Email"],
+        carrierEmailCC: extractedData["Carrier CC"],
+        trailer: extractedData["Trailer Number"],
+        idType: extractedData[`ID ${i} - Type`],
+        idValue: extractedData[`ID ${i} - Value`],
+        appointmentDate: formatTmDate(extractedData[`ID ${i} - Date`]),
+        timeSlot1: formatTmTime(extractedData[`ID ${i} - Time Slot`]),
+        skidCount: extractedData[`ID ${i} - Skid Count`] || extractedData[`ID ${i} - Pieces Count`],
+        comments: extractedData[`ID ${i} - Comments`],
+        confirmedDate: formatTmDate(extractedData[`ID ${i} - Date`]) || '',
+        confirmedTimeSlot: formatTmTime(extractedData[`ID ${i} - Time Slot`]) || '',
+        appointmentId: '',
+        exceptionFlag: false
+      };
+      
+      const destStr = req.destination || '';
+      const hasSkidLimit = destStr.includes('7275') || destStr.includes('7410');
+      
+      if (req.loadType === 'Live Load' && hasSkidLimit && parseInt(req.skidCount, 10) > 15 && req.applianceDropOff !== 'Yes' && !String(req.skidCount).toLowerCase().includes('floor')) {
+        req.exceptionFlag = true;
+      }
 
-          requests.push(req);
-          i++;
-        }
+      requests.push(req);
+      i++;
+    }
 
-        if (requests.length === 0 && (extractedData["Destination"] || extractedData["ID Value"])) {
-          const req = { 
-            id: fileName + Date.now().toString(), 
-            sourceFile: fileName,
-            originalSubject: originalSubject,
-            originalMessageId: originalMessageId,
-            timestamp: emailDate.toISOString(),
-            displayTime: emailDate.toLocaleString(),
-            status: 'Requested',
-            needsAppointment: extractedData["Appointment Needed"],
-            region: extractedData["Region"],
-            destination: extractedData["Destination"],
-            appointmentDate: formatTmDate(extractedData["Date"]),
-            timeSlot1: formatTmTime(extractedData["1st Choice Time Slot"] || extractedData["Time Slot"]),
-            applianceDropOff: extractedData["Appliance Drop Off"],
-            applianceFirstMile: extractedData["Appliance First Mile"],
-            loadType: extractedData["Load Type"],
-            floorLoaded: extractedData["Floor Loaded"] || 'No',
-            boltonTrailerType: extractedData["Bolton Load Category"] || '',
-            idType: extractedData["ID Type"],
-            idValue: extractedData["ID Value"],
-            hasBol: extractedData["Has BOL"],
-            skidCount: extractedData["SKID Count"] || extractedData["Pieces Count"],
-            vendor: extractedData["Vendor/Shipper"],
-            carrier: extractedData["Carrier"],
-            carrierEmail: extractedData["Carrier Email"],
-            carrierEmailCC: extractedData["Carrier CC"],
-            trailer: extractedData["Trailer Number"],
-            comments: extractedData["Comments"] || '',
-            confirmedDate: formatTmDate(extractedData["Date"]) || '',
-            confirmedTimeSlot: formatTmTime(extractedData["1st Choice Time Slot"] || extractedData["Time Slot"]) || '',
-            appointmentId: '',
-            exceptionFlag: false
-          };
+    if (requests.length === 0 && (extractedData["Destination"] || extractedData["ID Value"])) {
+      const req = { 
+        id: fileName + Date.now().toString(), 
+        sourceFile: fileName,
+        originalSubject: originalSubject,
+        originalMessageId: originalMessageId,
+        timestamp: emailDate.toISOString(),
+        displayTime: emailDate.toLocaleString(),
+        status: 'Requested',
+        needsAppointment: extractedData["Appointment Needed"],
+        region: extractedData["Region"],
+        destination: extractedData["Destination"],
+        appointmentDate: formatTmDate(extractedData["Date"]),
+        timeSlot1: formatTmTime(extractedData["1st Choice Time Slot"] || extractedData["Time Slot"]),
+        applianceDropOff: extractedData["Appliance Drop Off"],
+        loadType: extractedData["Load Type"],
+        floorLoaded: extractedData["Floor Loaded"] || 'No',
+        boltonTrailerType: extractedData["Bolton Load Category"] || '',
+        idType: extractedData["ID Type"],
+        idValue: extractedData["ID Value"],
+        hasBol: extractedData["Has BOL"],
+        skidCount: extractedData["SKID Count"] || extractedData["Pieces Count"],
+        vendor: extractedData["Vendor/Shipper"],
+        carrier: extractedData["Carrier"],
+        carrierEmail: extractedData["Carrier Email"],
+        carrierEmailCC: extractedData["Carrier CC"],
+        trailer: extractedData["Trailer Number"],
+        comments: extractedData["Comments"] || '',
+        confirmedDate: formatTmDate(extractedData["Date"]) || '',
+        confirmedTimeSlot: formatTmTime(extractedData["1st Choice Time Slot"] || extractedData["Time Slot"]) || '',
+        appointmentId: '',
+        exceptionFlag: false
+      };
 
-          const destStr = req.destination || '';
-          const hasSkidLimit = destStr.includes('7275') || destStr.includes('7410');
-          
-          if (req.loadType === 'Live Load' && hasSkidLimit && parseInt(req.skidCount, 10) > 15 && req.applianceDropOff !== 'Yes' && !String(req.skidCount).toLowerCase().includes('floor')) {
-            req.exceptionFlag = true;
-          }
-          requests.push(req);
-        }
+      const destStr = req.destination || '';
+      const hasSkidLimit = destStr.includes('7275') || destStr.includes('7410');
+      
+      if (req.loadType === 'Live Load' && hasSkidLimit && parseInt(req.skidCount, 10) > 15 && req.applianceDropOff !== 'Yes' && !String(req.skidCount).toLowerCase().includes('floor')) {
+        req.exceptionFlag = true;
+      }
+      requests.push(req);
     }
 
     return requests;
@@ -1666,7 +1699,7 @@ export default function App() {
               <td style="padding: 8px 12px; border: 1px solid #b8d4f0;">${req.idValue || 'N/A'}</td>
             </tr>
             <tr>
-              <td style="padding: 8px 12px; border: 1px solid #b8d4f0; background-color: #cce0f5; font-weight: bold;">Number of ${req.applianceDropOff === 'Yes' || req.applianceFirstMile === 'Yes' ? 'Pieces' : 'Skids'}</td>
+              <td style="padding: 8px 12px; border: 1px solid #b8d4f0; background-color: #cce0f5; font-weight: bold;">Number of ${req.applianceDropOff === 'Yes' ? 'Pieces' : 'Skids'}</td>
               <td style="padding: 8px 12px; border: 1px solid #b8d4f0;">${req.floorLoaded === 'Yes' ? 'Floor Loaded' : req.skidCount}</td>
             </tr>
             <tr>
@@ -1829,7 +1862,7 @@ export default function App() {
                  <td style="padding: 8px 12px; border: 1px solid #b8d4f0;">${req.trailer || 'N/A'}</td>
                </tr>
                <tr>
-                 <td style="padding: 8px 12px; border: 1px solid #b8d4f0; background-color: #e6f0fa; font-weight: bold;">Number of ${req.applianceDropOff === 'Yes' || req.applianceFirstMile === 'Yes' ? 'Pieces' : 'Skids'}</td>
+                 <td style="padding: 8px 12px; border: 1px solid #b8d4f0; background-color: #e6f0fa; font-weight: bold;">Number of ${req.applianceDropOff === 'Yes' ? 'Pieces' : 'Skids'}</td>
                  <td style="padding: 8px 12px; border: 1px solid #b8d4f0;">${req.floorLoaded === 'Yes' ? 'Floor Loaded' : req.skidCount}</td>
                </tr>
                <tr style="background-color: #fffde7;">
@@ -2031,13 +2064,8 @@ export default function App() {
   let currentDestinationOptions = [];
   if (formData.region === 'East') currentDestinationOptions = EAST_DESTINATIONS;
   else if (formData.region === 'West') currentDestinationOptions = WEST_DESTINATIONS;
-  else if (formData.region === 'DC to DC Transfer') currentDestinationOptions = [...EAST_DESTINATIONS, ...WEST_DESTINATIONS];
 
   const needsApplianceSelection = formData.destination.includes('DFC') || formData.destination.includes('MDO');
-
-  const isEastFirstMile = formData.region === 'East' && (formData.destination.includes('7340') || formData.destination.includes('7403') || formData.destination.includes('7364'));
-  const isWestFirstMile = formData.region === 'West' && (formData.destination.includes('7347') || formData.destination.includes('7403') || formData.destination.includes('7364'));
-  const needsFirstMileSelection = isEastFirstMile || isWestFirstMile;
 
   return (
     <div className="min-h-screen bg-slate-100 flex flex-col font-sans">
@@ -2573,28 +2601,9 @@ export default function App() {
                         <input type="radio" name="region" value="West" className="hidden" checked={formData.region === 'West'} onChange={handleInputChange} />
                         West
                       </label>
-                      <label className={`flex-1 flex items-center justify-center gap-2 p-3 border rounded-lg cursor-pointer transition-colors ${formData.region === 'DC to DC Transfer' ? 'border-[#f96302] bg-orange-50 text-orange-900 font-bold' : 'hover:bg-slate-50 text-slate-600'}`}>
-                        <input type="radio" name="region" value="DC to DC Transfer" className="hidden" checked={formData.region === 'DC to DC Transfer'} onChange={handleInputChange} />
-                        DC to DC Transfer
-                      </label>
                     </div>
                     {formErrors.region && <p className="text-red-500 text-xs mt-1">{formErrors.region}</p>}
                   </div>
-
-                  {formData.region === 'DC to DC Transfer' && (
-                    <div className="space-y-2">
-                      <label className="block text-sm font-bold text-slate-700">Origin <span className="text-red-500">*</span></label>
-                      <input 
-                        type="text" 
-                        name="origin" 
-                        value={formData.origin} 
-                        onChange={handleInputChange} 
-                        placeholder="e.g. 7275"
-                        className={`w-full p-3 border rounded-lg outline-none transition-colors ${formErrors.origin ? 'border-red-500 bg-red-50' : 'border-slate-300 focus:border-[#f96302]'}`}
-                      />
-                      {formErrors.origin && <p className="text-red-500 text-xs mt-1">{formErrors.origin}</p>}
-                    </div>
-                  )}
 
                   <div className="space-y-2">
                     <label className="block text-sm font-bold text-slate-700">Destination <span className="text-red-500">*</span></label>
@@ -2613,9 +2622,9 @@ export default function App() {
                     {formErrors.destination && <p className="text-red-500 text-xs mt-1">{formErrors.destination}</p>}
                   </div>
 
-                  {formData.region !== 'DC to DC Transfer' && needsApplianceSelection && (
+                  {needsApplianceSelection && (
                     <div className="space-y-2 col-span-1 md:col-span-2">
-                      <label className="block text-sm font-bold text-slate-700">Is this an Appliance Drop off? <span className="text-red-500">*</span></label>
+                      <label className="block text-sm font-bold text-slate-700">Is this an appliance drop off? <span className="text-red-500">*</span></label>
                       <div className="flex gap-4">
                         <label className="flex items-center gap-2 cursor-pointer text-slate-700">
                           <input type="radio" name="applianceDropOff" value="Yes" checked={formData.applianceDropOff === 'Yes'} onChange={handleInputChange} className="accent-[#f96302]" /> Yes
@@ -2628,30 +2637,16 @@ export default function App() {
                     </div>
                   )}
 
-                  {formData.region !== 'DC to DC Transfer' && needsFirstMileSelection && (
-                    <div className="space-y-2 col-span-1 md:col-span-2">
-                      <label className="block text-sm font-bold text-slate-700">Is this an Appliance First Mile Drop off? <span className="text-red-500">*</span></label>
-                      <div className="flex gap-4">
-                        <label className="flex items-center gap-2 cursor-pointer text-slate-700">
-                          <input type="radio" name="applianceFirstMile" value="Yes" checked={formData.applianceFirstMile === 'Yes'} onChange={handleInputChange} className="accent-[#f96302]" /> Yes
-                        </label>
-                        <label className="flex items-center gap-2 cursor-pointer text-slate-700">
-                          <input type="radio" name="applianceFirstMile" value="No" checked={formData.applianceFirstMile === 'No'} onChange={handleInputChange} className="accent-[#f96302]" /> No
-                        </label>
-                      </div>
-                      {formErrors.applianceFirstMile && <p className="text-red-500 text-xs mt-1">{formErrors.applianceFirstMile}</p>}
-                    </div>
-                  )}
                 </div>
               </section>
 
               <hr className="border-slate-100" />
 
-              {/* SECTION 2: SHIPMENT & PO DETAILS (or DC TRANSFER DETAILS) */}
+              {/* SECTION 2: SHIPMENT & PO DETAILS */}
               <section>
                 <div className="flex justify-between items-center mb-4">
                   <h3 className="text-sm font-bold text-slate-400 uppercase tracking-wider flex items-center gap-2">
-                    <Truck className="w-4 h-4" /> 2. {formData.region === 'DC to DC Transfer' ? 'DC to DC Transfer Details' : 'Shipment Details'}
+                    <Truck className="w-4 h-4" /> 2. Shipment Details
                   </h3>
                 </div>
 
@@ -2662,126 +2657,6 @@ export default function App() {
                   </div>
                 )}
 
-                {formData.region === 'DC to DC Transfer' ? (
-                   <div className="p-5 border border-slate-200 rounded-xl bg-slate-50 shadow-sm relative space-y-4" onPaste={handleDcPaste}>
-                     <div className="text-xs text-blue-700 bg-blue-50 border border-blue-200 p-3 rounded-lg flex items-center gap-2 mb-2 shadow-sm">
-                         <FileText className="w-4 h-4 flex-shrink-0" /> 
-                         <span><strong>Quick Paste:</strong> Click anywhere inside this box and press <strong>Ctrl+V</strong> to paste the entire data table at once! It will automatically fill all fields (including Origin and Destination).</span>
-                     </div>
-                     <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                        <div className="space-y-1.5">
-                          <label className="block text-xs font-bold text-slate-500 uppercase">Carrier <span className="text-red-500">*</span></label>
-                          <input type="text" name="carrier" value={formData.carrier} onChange={handleInputChange} className={`w-full p-2.5 border rounded-lg text-sm outline-none transition-colors ${formErrors.carrier ? 'border-red-500 bg-red-50' : 'border-slate-300 focus:border-[#f96302]'}`} />
-                          {formErrors.carrier && <p className="text-red-500 text-xs">{formErrors.carrier}</p>}
-                        </div>
-                        <div className="space-y-1.5">
-                          <label className="block text-xs font-bold text-slate-500 uppercase">Trailer # <span className="text-red-500">*</span></label>
-                          <input type="text" name="trailer" value={formData.trailer} onChange={handleInputChange} className={`w-full p-2.5 border rounded-lg text-sm outline-none transition-colors ${formErrors.trailer ? 'border-red-500 bg-red-50' : 'border-slate-300 focus:border-[#f96302]'}`} />
-                          {formErrors.trailer && <p className="text-red-500 text-xs">{formErrors.trailer}</p>}
-                        </div>
-                        
-                        <div className="space-y-1.5">
-                          <label className="block text-xs font-bold text-slate-500 uppercase">Seal #</label>
-                          <input type="text" value={formData.dcTransferData.seal} onChange={(e) => handleDcChange('seal', e.target.value)} className="w-full p-2.5 border border-slate-300 rounded-lg text-sm outline-none focus:border-[#f96302]" />
-                        </div>
-                        <div className="space-y-1.5">
-                          <label className="block text-xs font-bold text-slate-500 uppercase">Weight [lbs] <span className="text-red-500">*</span></label>
-                          <input type="number" value={formData.dcTransferData.weight} onChange={(e) => handleDcChange('weight', e.target.value)} className={`w-full p-2.5 border rounded-lg text-sm outline-none transition-colors ${formErrors.dc_weight ? 'border-red-500 bg-red-50' : 'border-slate-300 focus:border-[#f96302]'}`} />
-                          {formErrors.dc_weight && <p className="text-red-500 text-xs">{formErrors.dc_weight}</p>}
-                        </div>
-
-                        <div className="space-y-1.5">
-                          <label className="block text-xs font-bold text-slate-500 uppercase">Pallets</label>
-                          <input type="number" value={formData.dcTransferData.pallets} onChange={(e) => handleDcChange('pallets', e.target.value)} className="w-full p-2.5 border border-slate-300 rounded-lg text-sm outline-none focus:border-[#f96302]" />
-                        </div>
-                        <div className="space-y-1.5">
-                          <label className="block text-xs font-bold text-slate-500 uppercase">Cartons</label>
-                          <input type="number" value={formData.dcTransferData.cartons} onChange={(e) => handleDcChange('cartons', e.target.value)} className="w-full p-2.5 border border-slate-300 rounded-lg text-sm outline-none focus:border-[#f96302]" />
-                        </div>
-
-                        <div className="space-y-1.5">
-                          <label className="block text-xs font-bold text-slate-500 uppercase">FB #</label>
-                          <input type="text" value={formData.dcTransferData.fb} onChange={(e) => handleDcChange('fb', e.target.value)} className="w-full p-2.5 border border-slate-300 rounded-lg text-sm outline-none focus:border-[#f96302]" />
-                        </div>
-                        <div className="space-y-1.5">
-                          <label className="block text-xs font-bold text-slate-500 uppercase">FB2 #</label>
-                          <input type="text" value={formData.dcTransferData.fb2} onChange={(e) => handleDcChange('fb2', e.target.value)} className="w-full p-2.5 border border-slate-300 rounded-lg text-sm outline-none focus:border-[#f96302]" />
-                        </div>
-
-                        <div className="space-y-1.5">
-                          <label className="block text-xs font-bold text-slate-500 uppercase">BOL #</label>
-                          <input type="text" value={formData.dcTransferData.bol} onChange={(e) => handleDcChange('bol', e.target.value)} className="w-full p-2.5 border border-slate-300 rounded-lg text-sm outline-none focus:border-[#f96302]" />
-                        </div>
-                        <div className="space-y-1.5">
-                          <label className="block text-xs font-bold text-slate-500 uppercase">BOL2 #</label>
-                          <input type="text" value={formData.dcTransferData.bol2} onChange={(e) => handleDcChange('bol2', e.target.value)} className="w-full p-2.5 border border-slate-300 rounded-lg text-sm outline-none focus:border-[#f96302]" />
-                        </div>
-
-                        <div className="space-y-1.5">
-                          <label className="block text-xs font-bold text-slate-500 uppercase">TU #</label>
-                          <input type="text" value={formData.dcTransferData.tu} onChange={(e) => handleDcChange('tu', e.target.value)} className="w-full p-2.5 border border-slate-300 rounded-lg text-sm outline-none focus:border-[#f96302]" />
-                        </div>
-                        <div className="space-y-1.5">
-                          <label className="block text-xs font-bold text-slate-500 uppercase">TU2 #</label>
-                          <input type="text" value={formData.dcTransferData.tu2} onChange={(e) => handleDcChange('tu2', e.target.value)} className="w-full p-2.5 border border-slate-300 rounded-lg text-sm outline-none focus:border-[#f96302]" />
-                        </div>
-
-                        <div className="space-y-1.5">
-                          <label className="block text-xs font-bold text-slate-500 uppercase">SAP BOL #</label>
-                          <input type="text" value={formData.dcTransferData.sapBol} onChange={(e) => handleDcChange('sapBol', e.target.value)} className="w-full p-2.5 border border-slate-300 rounded-lg text-sm outline-none focus:border-[#f96302]" />
-                        </div>
-                        <div className="space-y-1.5">
-                          <label className="block text-xs font-bold text-slate-500 uppercase">Cube Ft3</label>
-                          <input type="text" value={formData.dcTransferData.cube} onChange={(e) => handleDcChange('cube', e.target.value)} className="w-full p-2.5 border border-slate-300 rounded-lg text-sm outline-none focus:border-[#f96302]" />
-                        </div>
-
-                        <div className="space-y-1.5">
-                          <label className="block text-xs font-bold text-slate-500 uppercase">SCAC</label>
-                          <input type="text" value={formData.dcTransferData.scac} onChange={(e) => handleDcChange('scac', e.target.value)} className="w-full p-2.5 border border-slate-300 rounded-lg text-sm outline-none focus:border-[#f96302]" />
-                        </div>
-                        <div className="space-y-1.5">
-                          <label className="block text-xs font-bold text-slate-500 uppercase">TMS Ship ID <span className="text-red-500">*</span></label>
-                          <input type="text" value={formData.dcTransferData.tms} onChange={(e) => handleDcChange('tms', e.target.value)} className={`w-full p-2.5 border rounded-lg text-sm outline-none transition-colors ${formErrors.dc_tms ? 'border-red-500 bg-red-50' : 'border-slate-300 focus:border-[#f96302]'}`} />
-                          {formErrors.dc_tms && <p className="text-red-500 text-xs">{formErrors.dc_tms}</p>}
-                        </div>
-
-                        <div className="space-y-1.5">
-                          <label className="block text-xs font-bold text-slate-500 uppercase">Freezable</label>
-                          <select value={formData.dcTransferData.freezable} onChange={(e) => handleDcChange('freezable', e.target.value)} className="w-full p-2.5 border border-slate-300 rounded-lg text-sm bg-white outline-none focus:border-[#f96302]">
-                              <option value="No">No</option>
-                              <option value="Yes">Yes</option>
-                          </select>
-                        </div>
-                        <div className="space-y-1.5">
-                          <label className="block text-xs font-bold text-slate-500 uppercase">Load Order</label>
-                          <input type="text" value={formData.dcTransferData.loadOrder} onChange={(e) => handleDcChange('loadOrder', e.target.value)} placeholder="e.g. 1-FL" className="w-full p-2.5 border border-slate-300 rounded-lg text-sm outline-none focus:border-[#f96302]" />
-                        </div>
-
-                        <div className="space-y-1.5">
-                           <label className="block text-xs font-bold text-slate-500 uppercase">Preferred Date <span className="text-red-500">*</span></label>
-                           <div className="relative">
-                              <Calendar className="w-4 h-4 absolute left-3 top-3 text-slate-400" />
-                              <input 
-                                type="date" 
-                                min={formData.region ? calculateTargetDate(formData.region, formData.destination, 'Drop Load') : ''}
-                                value={formData.dcTransferData.preferredDate} 
-                                onChange={(e) => handleDcChange('preferredDate', e.target.value)} 
-                                className={`w-full pl-9 p-2.5 border rounded-lg outline-none shadow-sm text-sm transition-colors ${formErrors.dc_preferredDate ? 'border-red-500 bg-red-50 text-red-900' : 'border-slate-300 focus:border-[#f96302]'}`}
-                              />
-                           </div>
-                           {formErrors.dc_preferredDate && <p className="text-red-500 text-xs mt-1">{formErrors.dc_preferredDate}</p>}
-                        </div>
-                        <div className="space-y-1.5">
-                           <label className="block text-xs font-bold text-slate-500 uppercase">Comments</label>
-                           <div className="relative">
-                              <MessageSquare className="w-4 h-4 absolute left-3 top-3 text-slate-400" />
-                              <input type="text" value={formData.dcTransferData.comments} onChange={(e) => handleDcChange('comments', e.target.value)} className="w-full pl-9 p-2.5 border border-slate-300 rounded-lg text-sm outline-none focus:border-[#f96302]" />
-                           </div>
-                        </div>
-
-                     </div>
-                   </div>
-                ) : (
                   <>
                     <div className="mb-6 grid grid-cols-1 md:grid-cols-2 gap-6">
                       <div className="space-y-2 md:col-span-2">
@@ -2979,7 +2854,7 @@ export default function App() {
                               </div>
 
                               <div className="space-y-2">
-                                <label className="block text-xs font-bold text-slate-500 uppercase tracking-wide">{(formData.applianceDropOff === 'Yes' || formData.applianceFirstMile === 'Yes') ? 'Pieces Count' : 'SKID Count'} {formData.floorLoaded !== 'Yes' && <span className="text-red-500">*</span>}</label>
+                                <label className="block text-xs font-bold text-slate-500 uppercase tracking-wide">Pieces/Skids Count {formData.floorLoaded !== 'Yes' && <span className="text-red-500">*</span>}</label>
                                 {formData.floorLoaded === 'Yes' ? (
                                     <div className="w-full p-2.5 border border-slate-200 bg-slate-100 rounded-lg text-sm text-slate-500 font-medium cursor-not-allowed">
                                       Floor Loaded
@@ -3027,7 +2902,6 @@ export default function App() {
                       </button>
                     </div>
                   </>
-                )}
               </section>
 
               <hr className="border-slate-100" />
@@ -3077,50 +2951,8 @@ export default function App() {
                   )}
                 </div>
 
-                {formData.region === 'DC to DC Transfer' && (
-                  <div className="mb-6 space-y-2 p-4 bg-slate-50 rounded-lg border border-slate-100 shadow-sm">
-                    <label className="block text-sm font-bold text-slate-700">Do you have an OBTR for this trailer? <span className="text-red-500">*</span></label>
-                    <div className="flex gap-6 mb-3">
-                      <label className="flex items-center gap-2 cursor-pointer text-slate-700">
-                        <input type="radio" name="hasObtr" value="Yes" checked={formData.hasObtr === 'Yes'} onChange={handleInputChange} className="accent-[#f96302]" /> Yes
-                      </label>
-                      <label className="flex items-center gap-2 cursor-pointer text-slate-700">
-                        <input type="radio" name="hasObtr" value="No" checked={formData.hasObtr === 'No'} onChange={handleInputChange} className="accent-[#f96302]" /> No
-                      </label>
-                    </div>
-                    {formErrors.hasObtr && <p className="text-red-500 text-xs mt-1">{formErrors.hasObtr}</p>}
-
-                    {formData.hasObtr === 'Yes' && (
-                      <div className="mt-2 space-y-2">
-                        <label className="flex items-center gap-2 px-4 py-2 bg-white border border-slate-300 text-slate-700 rounded-lg hover:bg-slate-50 transition cursor-pointer shadow-sm w-max text-sm font-medium">
-                          <UploadCloud className="w-4 h-4 text-[#f96302]" /> 
-                          Upload OBTR PDF(s)
-                          <input type="file" accept=".pdf" multiple className="hidden" onChange={(e) => handleFileUpload(e, 'obtrFiles')} />
-                        </label>
-                        {formErrors.obtrFiles && <p className="text-red-500 text-xs mt-2">{formErrors.obtrFiles}</p>}
-                        
-                        {formData.obtrFiles.length > 0 && (
-                          <div className="flex flex-col gap-1.5 mt-3">
-                            {formData.obtrFiles.map((file, idx) => (
-                              <div key={idx} className="flex items-center justify-between bg-white px-3 py-2 rounded-lg border border-slate-200 text-sm max-w-md shadow-sm">
-                                <span className="truncate pr-3 text-slate-700 font-medium flex items-center gap-2">
-                                  <FileText className="w-4 h-4 text-slate-400" /> {file.name}
-                                </span>
-                                <button type="button" onClick={() => removeFile(idx, 'obtrFiles')} className="text-slate-400 hover:text-red-500 hover:bg-red-50 p-1 rounded transition-colors" title="Remove File">
-                                  <X className="w-4 h-4" />
-                                </button>
-                              </div>
-                            ))}
-                          </div>
-                        )}
-                      </div>
-                    )}
-                  </div>
-                )}
-
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
                   
-                  {formData.region !== 'DC to DC Transfer' && (
                     <>
                       <div className="space-y-2">
                         <label className="block text-sm font-bold text-slate-700">Vendor / Shipper Name <span className="text-red-500">*</span></label>
@@ -3149,7 +2981,6 @@ export default function App() {
                         {formErrors.trailer && <p className="text-red-500 text-xs mt-1">{formErrors.trailer}</p>}
                       </div>
                     </>
-                  )}
 
                   <div className="space-y-2">
                     <label className="block text-sm font-bold text-slate-700">Carrier Email Address <span className="text-red-500">*</span></label>
@@ -3240,6 +3071,121 @@ export default function App() {
         </main>
       )}
 
+      {/* --- 7411 Appointment Slots View --- */}
+      {viewMode === 'slots' && (
+        <main className="flex-1 overflow-y-auto p-6 transition-colors bg-slate-100">
+           <div className="w-full mx-auto">
+              <div className="flex flex-col md:flex-row justify-between items-start md:items-center mb-6 gap-4">
+                <div>
+                  <h2 className="text-2xl font-bold text-slate-800">7411 Appointment Slots</h2>
+                  <p className="text-sm text-slate-500">View and manage uploaded appointment capacity files.</p>
+                </div>
+                <div className="flex gap-2">
+                  <label className="flex items-center gap-2 bg-emerald-600 hover:bg-emerald-700 text-white px-5 py-2.5 rounded-lg shadow-sm font-medium transition-colors cursor-pointer">
+                     <UploadCloud className="w-5 h-5" /> Upload File
+                     <input type="file" accept=".csv,.xlsx" className="hidden" onChange={handleSlotMatrixUpload} />
+                  </label>
+                  <label className="flex items-center gap-2 bg-purple-600 hover:bg-purple-700 text-white px-5 py-2.5 rounded-lg shadow-sm font-medium transition-colors cursor-pointer">
+                     <CheckCircle2 className="w-5 h-5" /> Upload TM Export
+                     <input type="file" accept=".csv,.xlsx" className="hidden" onChange={handleSlotTMSyncUpload} />
+                  </label>
+                  {slotMatrix.length > 0 && (
+                    <button onClick={() => setSlotMatrix([])} className="flex items-center gap-2 bg-white border border-red-200 text-red-600 hover:bg-red-50 px-4 py-2.5 rounded-lg shadow-sm font-medium transition-colors">
+                       Clear Data
+                    </button>
+                  )}
+                </div>
+              </div>
+
+              {slotMatrix.length > 0 && (
+                 <div className="bg-white p-4 rounded-xl shadow-sm border border-slate-200 mb-6 flex flex-wrap items-center gap-2" ref={dropdownRef}>
+                     <div className="flex items-center gap-2 mr-4 text-slate-500 font-bold text-sm uppercase tracking-wider">
+                         <Filter className="w-4 h-4" /> Filters
+                     </div>
+                     <MultiSelectDropdown filterKey="facilityId" label="Facility ID" options={getUniqueSlotValues('Facility ID')} activeDropdown={activeDropdown} setActiveDropdown={setActiveDropdown} slotFilters={slotFilters} handleSlotFilterChange={handleSlotFilterChange} setSlotFilters={setSlotFilters} />
+                     <MultiSelectDropdown filterKey="date" label="Date" options={getUniqueSlotValues('Date')} activeDropdown={activeDropdown} setActiveDropdown={setActiveDropdown} slotFilters={slotFilters} handleSlotFilterChange={handleSlotFilterChange} setSlotFilters={setSlotFilters} />
+                     <MultiSelectDropdown filterKey="status" label="Status" options={['Not Booked', 'Hold', 'Booked']} activeDropdown={activeDropdown} setActiveDropdown={setActiveDropdown} slotFilters={slotFilters} handleSlotFilterChange={handleSlotFilterChange} setSlotFilters={setSlotFilters} />
+                     
+                     <div className="w-px h-8 bg-slate-200 mx-2 hidden md:block"></div>
+                     
+                     <MultiSelectDropdown filterKey="vendorName" label="Vendor Name" options={getUniqueSlotValues('Vendor Name')} activeDropdown={activeDropdown} setActiveDropdown={setActiveDropdown} slotFilters={slotFilters} handleSlotFilterChange={handleSlotFilterChange} setSlotFilters={setSlotFilters} />
+                     <MultiSelectDropdown filterKey="freightOrder" label="Freight Order" options={getUniqueSlotValues('Freight Order')} activeDropdown={activeDropdown} setActiveDropdown={setActiveDropdown} slotFilters={slotFilters} handleSlotFilterChange={handleSlotFilterChange} setSlotFilters={setSlotFilters} />
+                     <MultiSelectDropdown filterKey="purchasingDoc" label="Purchasing Doc." options={getUniqueSlotValues('Purchasing Doc.')} activeDropdown={activeDropdown} setActiveDropdown={setActiveDropdown} slotFilters={slotFilters} handleSlotFilterChange={handleSlotFilterChange} setSlotFilters={setSlotFilters} />
+
+                     {Object.values(slotFilters).some(arr => arr.length > 0) && (
+                         <button 
+                             onClick={() => setSlotFilters({facilityId: [], date: [], status: [], vendorName: [], freightOrder: [], purchasingDoc: []})}
+                             className="ml-auto flex items-center gap-1.5 text-xs font-bold text-slate-500 hover:text-slate-700 bg-slate-100 hover:bg-slate-200 px-3 py-2 rounded-lg transition-colors"
+                         >
+                             <X className="w-3.5 h-3.5" /> Clear All
+                         </button>
+                     )}
+                 </div>
+              )}
+              
+              <div className="bg-white rounded-xl shadow-sm border border-slate-200 overflow-hidden min-h-[400px]">
+                 {slotMatrix.length === 0 ? (
+                   <div className="flex flex-col items-center justify-center p-16 text-center">
+                     <Calendar className="w-16 h-16 mb-4 text-slate-300" />
+                     <p className="text-lg font-medium text-slate-500">No file loaded.</p>
+                     <p className="text-sm mt-1 text-slate-400">Upload your "7411 appointment slots" file to view its contents.</p>
+                   </div>
+                 ) : (
+                   <div className="overflow-x-auto">
+                     <table className="w-full text-sm text-left whitespace-nowrap">
+                       <thead className="bg-slate-50 text-slate-600 border-b border-slate-200 font-semibold uppercase text-xs">
+                         <tr>
+                           {slotHeaders.map(key => (
+                             <th key={key} className="px-4 py-3 cursor-pointer hover:bg-slate-200 transition-colors select-none" onClick={() => slotRequestSort(key)}>
+                                <div className="flex items-center gap-1">{key} {getSlotSortIcon(key)}</div>
+                             </th>
+                           ))}
+                         </tr>
+                       </thead>
+                       <tbody className="divide-y divide-slate-100">
+                         {processedSlots.length === 0 ? (
+                             <tr>
+                                 <td colSpan={slotHeaders.length} className="px-4 py-12 text-center text-slate-500 font-medium">
+                                     No slots match your current filters.
+                                 </td>
+                             </tr>
+                         ) : (
+                             processedSlots.map((slot) => (
+                               <tr key={slot.id} className="hover:bg-slate-50 transition-colors">
+                                 {slotHeaders.map(key => {
+                                    if (key === 'Status') {
+                                        const val = slot[key] || 'Not Booked';
+                                        let badgeClasses = 'bg-slate-100 text-slate-800 border-slate-200';
+                                        if (val === 'Hold') badgeClasses = 'bg-yellow-100 text-yellow-800 border-yellow-200';
+                                        else if (val === 'Booked') badgeClasses = 'bg-red-100 text-red-800 border-red-200';
+                                        else if (val === 'Not Booked') badgeClasses = 'bg-green-100 text-green-800 border-green-200';
+    
+                                        return (
+                                          <td key={key} className="px-4 py-3">
+                                            <span className={`px-2.5 py-1 rounded-full text-xs font-bold border ${badgeClasses}`}>
+                                              {val}
+                                            </span>
+                                          </td>
+                                        )
+                                    }
+                                    return (
+                                      <td key={key} className="px-4 py-3 text-slate-600">
+                                        {slot[key] || '--'}
+                                      </td>
+                                    )
+                                 })}
+                               </tr>
+                             ))
+                         )}
+                       </tbody>
+                     </table>
+                   </div>
+                 )}
+              </div>
+           </div>
+        </main>
+      )}
+
       {/* Help / SOP Modal */}
       {showHelpModal && (
         <div className="fixed inset-0 bg-black/60 flex items-center justify-center p-4 z-[150] animate-in fade-in">
@@ -3247,68 +3193,59 @@ export default function App() {
             <div className="p-4 border-b bg-slate-50 flex items-center justify-between text-slate-800">
               <div className="flex items-center gap-2">
                 <HelpCircle className="w-5 h-5 text-[#f96302]"/>
-                <h3 className="font-bold text-lg">Load Booking Assistant - SOP</h3>
+                <h3 className="font-bold text-lg">How to Use the Load Booking Assistant</h3>
               </div>
               <button onClick={() => setShowHelpModal(false)} className="text-slate-400 hover:text-slate-600 hover:bg-slate-200 rounded p-1 transition-colors">
                 <X className="w-5 h-5" />
               </button>
             </div>
-            <div className="p-6 overflow-y-auto text-sm text-slate-700 space-y-8">
+            <div className="p-6 overflow-y-auto text-sm text-slate-700 space-y-6">
               
-              {/* Module 1 */}
-              <div>
-                <h4 className="font-bold text-lg text-slate-800 mb-2 border-b pb-2">Module 1: Vendor Booking Form (Intake)</h4>
-                <p className="mb-3"><strong>Goal:</strong> Generate standardized load booking .eml drafts.</p>
-                <ul className="list-disc pl-5 space-y-1 mb-4">
-                  <li><strong>Select Routing:</strong> Choose Region (East, West, DC to DC) and Destination.</li>
-                  <li><strong>Input Details:</strong> Define Load Type, Floor Loaded status, and Identifiers.</li>
-                  <li><strong>Attach Documents:</strong> Upload BOL and/or OBTR (must be .pdf).</li>
-                  <li><strong>Submit:</strong> Click "Review & Submit" to instantly download the formatted .eml draft and CSV.</li>
-                </ul>
-                <div className="bg-orange-50 border border-orange-200 rounded-lg p-4">
-                  <p className="font-bold text-orange-800 mb-2">🔥 SMART FEATURES:</p>
-                  <ul className="list-disc pl-5 space-y-2 text-orange-900">
-                    <li><strong>DC-to-DC Smart Paste:</strong> If Region is "DC to DC Transfer", click inside the gray "Quick Paste" box and press Ctrl+V. Paste an entire row from Excel, and the system will automatically map headers (Origin, Destination, Carrier, Trailer, Seal, Weight, etc.) to the correct form fields.</li>
-                    <li><strong>ID Auto-Split:</strong> In the Shipment/PO Identification field, paste a comma, tab, or newline-separated list of IDs. The form will automatically spawn individual rows for each ID.</li>
-                    <li><strong>Intelligent Cutoffs:</strong> The "Preferred Date" calendar automatically disables invalid dates based on 2 PM/4 PM Friday cutoff rules and destination-specific weekend logic.</li>
-                  </ul>
-                </div>
+              <div className="bg-orange-50 border border-orange-200 rounded-lg p-4 mb-2">
+                <p className="font-bold text-orange-900 mb-1">Welcome!</p>
+                <p className="text-orange-800">This form collects all the mandatory information needed to schedule a load. Follow the 3 simple steps below, and the tool will automatically generate a perfect email draft for you to send.</p>
               </div>
 
-              {/* Module 2 */}
               <div>
-                <h4 className="font-bold text-lg text-slate-800 mb-2 border-b pb-2">Module 2: Admin Email Compiler (Processing)</h4>
-                <p className="mb-3"><strong>Goal:</strong> Parse incoming requests, assign appointments, and dispatch confirmations. <br/><span className="text-slate-500 italic">Access via the "Email Compiler" header button.</span></p>
-                <ul className="list-disc pl-5 space-y-1 mb-4">
-                  <li><strong>Import Data:</strong> Pull files directly into the UI.</li>
-                  <li><strong>Reconcile:</strong> Click "Upload TM Export" to cross-reference existing systems.</li>
-                  <li><strong>Process:</strong> Input the Appointment ID, Confirmed Date, and Confirmed Time for pending rows.</li>
-                  <li><strong>Dispatch:</strong> Check the boxes on the left for ready rows, then click Reply Selected to batch-generate outgoing confirmation .eml files.</li>
+                <h4 className="font-bold text-lg text-slate-800 mb-2 border-b pb-2">Step 1: Location Details</h4>
+                <ul className="list-disc pl-5 space-y-2">
+                  <li><strong>Region & Destination (Required):</strong> Select East or West, then choose the specific facility.</li>
+                  <li><strong>Appliance Options:</strong> If you select a DFC or MDO facility, you will be required to answer Yes/No to the Appliance questions that appear.</li>
                 </ul>
-                <div className="bg-orange-50 border border-orange-200 rounded-lg p-4">
-                  <p className="font-bold text-orange-800 mb-2">🔥 SMART FEATURES:</p>
-                  <ul className="list-disc pl-5 space-y-2 text-orange-900">
-                    <li><strong>Global Outlook Drag-and-Drop:</strong> Do not use a file picker. Drag .eml, .msg, or .csv files directly from Classic Outlook onto the browser window. The app parses base64 attachments and email bodies instantly.</li>
-                    <li><strong>One-Click SAP Copy:</strong> Hover over the yellow "SAP TM Comments" cell and click the document icon. It instantly copies the perfectly formatted text block to your clipboard for SAP entry.</li>
-                    <li><strong>Auto-Exception Flagging:</strong> Live loads exceeding 15 skids automatically trigger a red alert icon in the grid.</li>
-                  </ul>
-                </div>
               </div>
 
-              {/* Module 3 */}
               <div>
-                <h4 className="font-bold text-lg text-slate-800 mb-2 border-b pb-2">Module 3: 7411 Appointment Slots (Tracking)</h4>
-                <p className="mb-3"><strong>Goal:</strong> Visualize and filter facility capacity. <br/><span className="text-slate-500 italic">Access via the "7411 Appointment Slots" header button.</span></p>
-                <ul className="list-disc pl-5 space-y-1 mb-4">
-                  <li><strong>Upload Matrix:</strong> Click "Upload File" to ingest your master capacity spreadsheet.</li>
-                  <li><strong>Filter Data:</strong> Use the column headers to sort, or the top dropdowns to filter.</li>
+                <h4 className="font-bold text-lg text-slate-800 mb-2 border-b pb-2">Step 2: Shipment Details</h4>
+                <ul className="list-disc pl-5 space-y-2">
+                  <li><strong>Load Type (Required):</strong> Choose whether it is a Live Load or a Drop Load.</li>
+                  <li><strong>Floor Loaded (Required):</strong> Select Yes or No.</li>
+                  <li><strong>Identification (Required):</strong> Select 'Shipment ID' or 'PO' from the dropdown and type the exact number.
+                    <div className="mt-1 p-2 bg-slate-100 rounded border border-slate-200 text-xs">
+                      <strong>💡 Quick Tip:</strong> Need to add multiple POs? Copy a list of them from Excel, click into the ID box, and paste! The tool will instantly create all the rows for you.
+                    </div>
+                  </li>
+                  <li><strong>Date & Time (Required):</strong> Select your preferred date and time. 
+                    <br/><span className="text-slate-500 italic">Note: Dates on weekends or dates that violate Friday afternoon cutoffs will be automatically disabled.</span>
+                  </li>
+                  <li><strong>Count (Required):</strong> Enter the total number of Skids or Pieces (unless the trailer is Floor Loaded).</li>
+                  <li><strong>Comments:</strong> Optional box for specific instructions.</li>
                 </ul>
-                <div className="bg-orange-50 border border-orange-200 rounded-lg p-4">
-                  <p className="font-bold text-orange-800 mb-2">🔥 SMART FEATURES:</p>
-                  <ul className="list-disc pl-5 space-y-2 text-orange-900">
-                    <li><strong>Batch Dropdown Filtering:</strong> Open any dropdown (e.g., Vendor Name), type in the search bar, and click "Select All Matching". This allows rapid, complex matrix filtering without manual clicking.</li>
-                  </ul>
-                </div>
+              </div>
+
+              <div>
+                <h4 className="font-bold text-lg text-slate-800 mb-2 border-b pb-2">Step 3: Carrier Details</h4>
+                <ul className="list-disc pl-5 space-y-2">
+                  <li><strong>BOL (Required):</strong> Select if you have a BOL. If you select 'Yes', you <strong>must</strong> upload the PDF file.</li>
+                  <li><strong>Vendor & Carrier (Required):</strong> Type the Vendor/Shipper name, your Carrier name, and the exact Trailer Number.</li>
+                  <li><strong>Emails (Required):</strong> You must enter a main carrier email address. Click the "+ CC" button to add any dispatchers who need to be copied.</li>
+                </ul>
+              </div>
+
+              <div className="bg-slate-100 p-4 rounded-lg border border-slate-200 mt-6">
+                <h4 className="font-bold text-slate-800 mb-1 flex items-center gap-2">
+                  <CheckCircle2 className="w-4 h-4 text-green-600" /> All Done!
+                </h4>
+                <p>Click <strong>Review & Submit</strong> at the bottom. You will instantly get a Download button. Click it, and open the downloaded file—it will pop up right in Outlook, completely filled out with your PDFs attached and ready to send!</p>
               </div>
 
             </div>
